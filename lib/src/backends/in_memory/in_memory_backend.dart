@@ -164,9 +164,9 @@ class InMemoryBackend with DisposeGuard implements StorageBackend {
     if (!_data.containsKey(key)) {
       throw FileNotFoundError(key);
     }
+    // lastModified is when the bytes were written: a metadata change keeps it.
     _contentType[key] = contentType;
     _metadata[key] = Map.of(metadata);
-    _lastModified[key] = DateTime.now().toUtc();
   }
 
   @override

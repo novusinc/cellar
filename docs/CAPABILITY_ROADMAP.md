@@ -55,7 +55,7 @@ maintenance recipes see [`UPDATING.md`](UPDATING.md).
 |---|---|---|
 | One database per partition; atomic `wipePartition` | DONE | `deleteDatabase` per partition |
 | Chunked records + manifest-last crash safety | DONE | Generation-tagged so torn writes never mix generations |
-| `writtenAt` stamping (`lastModified` non-null on web) | DONE | Missing field = corruption, not compat |
+| `writtenAt` stamping (`lastModified` non-null on web) | DONE | Missing field = corruption, not compat. `updateMetadata` carries the record's `writtenAt` forward (in the same read-write transaction), so `lastModified` is when the bytes were written on every backend, as on native; a conformance case pins it for every backend |
 | Full conformance + Blob materialization in real Chrome | DONE | `make test-web`; Blob URLs verified via actual fetch |
 
 ## Remote backends

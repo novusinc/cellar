@@ -353,14 +353,24 @@ class _RawIndexedDbBackend with DisposeGuard implements StorageBackend {
     String? contentType,
     Map<String, String> metadata = const {},
   }) async {
-    final store = await _store('readonly');
+    // One read-write transaction (get, then put): IndexedDB transactions are
+    // atomic across tabs, so no writer can slip in between the two.
+    final store = await _store('readwrite');
     final result = await _request(store.get(key.toJS));
     if (result == null) throw FileNotFoundError(key);
 
     final bytes = _extractBody(key, result);
-    final writeStore = await _store('readwrite');
-    final record = _buildRecord(bytes, contentType, metadata);
-    await _request(writeStore.put(record, key.toJS));
+    // Carry the record's write time forward: lastModified is when the BYTES were
+    // written, as on native, so changing metadata must not restart an object's
+    // age (maxAge) or reorder it for eviction.
+    final writtenAt = (result as _IdbRecord).writtenAt;
+    final record = _buildRecord(
+      bytes,
+      contentType,
+      metadata,
+      writtenAt: writtenAt.isA<JSNumber>() ? writtenAt : null,
+    );
+    await _request(store.put(record, key.toJS));
   }
 
   // ── Materialize — never called on this layer ──
@@ -384,8 +394,9 @@ class _RawIndexedDbBackend with DisposeGuard implements StorageBackend {
   JSObject _buildRecord(
     Uint8List bytes,
     String? contentType,
-    Map<String, String> metadata,
-  ) {
+    Map<String, String> metadata, {
+    JSAny? writtenAt,
+  }) {
     return <String, Object?>{
           'body': bytes.toJS,
           'contentType': contentType?.toJS,
@@ -393,7 +404,9 @@ class _RawIndexedDbBackend with DisposeGuard implements StorageBackend {
           // Cellar-maintained write timestamp. IndexedDB has no native
           // last-modified tracking; we write it on every put so ObjectInfo
           // can return a non-null lastModified on web. Stored as ms-since-epoch.
-          'writtenAt': DateTime.now().toUtc().millisecondsSinceEpoch.toJS,
+          // [writtenAt] is passed only by updateMetadata, to keep the bytes' time.
+          'writtenAt':
+              writtenAt ?? DateTime.now().toUtc().millisecondsSinceEpoch.toJS,
         }.jsify()
         as JSObject;
   }

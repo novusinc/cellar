@@ -417,13 +417,19 @@ class ChunkedBackend with DisposeGuard implements StorageBackend {
     checkNotDisposed();
     final manifest = await _readManifest(key);
     if (manifest == null) throw FileNotFoundError(key);
-    await _writeManifest(
-      key,
-      generation: manifest.generation,
-      chunkCount: manifest.chunkCount,
-      totalSize: manifest.totalSize,
+    // Update the manifest record's metadata in place instead of rewriting the
+    // record: a rewrite is a write, and would stamp a new lastModified (the
+    // manifest's, which is what list reports) on an object whose bytes did not
+    // change.
+    await _backing.updateMetadata(
+      _manifestKey(key),
       contentType: contentType,
-      metadata: metadata,
+      metadata: {
+        _metaGeneration: '${manifest.generation}',
+        _metaChunkCount: '${manifest.chunkCount}',
+        _metaTotalSize: '${manifest.totalSize}',
+        ...metadata,
+      },
     );
   }
 
