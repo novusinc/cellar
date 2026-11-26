@@ -59,6 +59,7 @@ export 'src/cellar/storage_roots.dart';
 export 'src/backends/file_system/file_system_backend.dart'
     show FileSystemBackend;
 export 'src/backends/indexed_db/indexed_db_backend.dart' show IndexedDbBackend;
+export 'src/backends/in_memory/in_memory_backend.dart' show InMemoryBackend;
 
 // Bring-your-own-crypto interfaces — implement these to plug encryption into
 // EncryptedBackend (cipher_kit, or any crypto lib, provides implementations).

@@ -17,7 +17,6 @@ import '../batteries/encrypted_battery.dart';
 import '../batteries/scope_battery.dart';
 import '../batteries/stack_battery.dart';
 import '../harness/fake_encryptor.dart';
-import '../harness/in_memory_backend.dart';
 import '../platform/web/indexed_db_blob_battery.dart';
 
 import 'package:cellar/cellar_lowlevel.dart';

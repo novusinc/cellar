@@ -1,12 +1,24 @@
 import 'dart:typed_data';
 
-import 'package:cellar/cellar_lowlevel.dart';
+import 'package:cellar/src/core/dispose_guard.dart';
+import 'package:cellar/src/core/errors.dart';
+import 'package:cellar/src/core/materialized_file.dart';
+import 'package:cellar/src/core/object_info.dart';
+import 'package:cellar/src/core/storage_backend.dart';
+import 'package:cellar/src/core/write_options.dart';
 
-/// In-memory [StorageBackend] for tests. No disk, no IndexedDB.
+/// A volatile, in-process [StorageBackend]: nothing touches disk or IndexedDB,
+/// and everything is gone when the backend is disposed or the process ends.
 ///
-/// Implements the full StorageBackend contract. `materialize` throws —
-/// in-memory has no filesystem, so use a real FileSystemBackend in tests
-/// that exercise materialize.
+/// It implements the whole contract and passes the same conformance battery as
+/// the shipped backends, so it is a faithful stand-in when testing code that
+/// sits on a `StorageBackend` (a decorator, a lifecycle rule, an app's store)
+/// and a base for a decorator's own tests.
+///
+/// It keeps every object whole in memory, so it is not a cache for large
+/// files. [materialize] throws [UnsupportedError]: there is no filesystem to
+/// hand a path from, so wrap this in a backend that provides a real handle, or
+/// use `FileSystemBackend` in a test that exercises `materialize`.
 class InMemoryBackend with DisposeGuard implements StorageBackend {
   final Map<String, Uint8List> _data = {};
   final Map<String, Map<String, String>> _metadata = {};
@@ -16,14 +28,14 @@ class InMemoryBackend with DisposeGuard implements StorageBackend {
   @override
   String get disposeLabel => 'InMemoryBackend';
 
-  /// Test hook: total bytes currently stored.
+  /// Total bytes currently stored, for assertions in tests.
   int get totalBytes => _data.values.fold(0, (a, b) => a + b.length);
 
-  /// Test hook: number of objects currently stored.
+  /// Number of objects currently stored, for assertions in tests.
   int get objectCount => _data.length;
 
-  /// Test hook: set the lastModified timestamp for an existing key.
-  /// Used to simulate aged objects in lifecycle tests.
+  /// Sets the `lastModified` of an existing key (a missing key is ignored), to
+  /// simulate aged objects in lifecycle tests.
   void setLastModified(String key, DateTime when) {
     if (_data.containsKey(key)) _lastModified[key] = when.toUtc();
   }

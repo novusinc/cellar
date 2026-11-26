@@ -280,8 +280,8 @@ test/
   batteries/    the specs: conformance (the StorageBackend contract,
                 parameterized over any backend), core vocabulary, scope,
                 chunked, encrypted, cellar facade, decorator stacks
-  harness/      in-memory backend, forwarding backend, fake encryptor,
-                temp dirs
+  harness/      forwarding backend, fake encryptor, temp dirs (the
+                in-memory backend is public: lib/src/backends/in_memory/)
   platform/
     native/     suites only a real disk can host: FileSystemBackend
                 (+ its conformance run), the OS seam, atPath, the
