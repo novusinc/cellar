@@ -39,6 +39,11 @@ class FileSystemBackend with DisposeGuard implements StorageBackend {
     throw UnsupportedError('stub');
   }
 
+  /// Throws [UnsupportedError] — see the io variant.
+  Future<void> recoverInterruptedWrites() async {
+    throw UnsupportedError('stub');
+  }
+
   @override
   Future<void> write(
     String key,

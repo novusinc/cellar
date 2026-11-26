@@ -105,6 +105,59 @@ class FileSystemBackend with DisposeGuard implements StorageBackend {
     await _os.sweepTombstones(_baseDir);
   }
 
+  /// How old a leftover sidecar temp must be before [recoverInterruptedWrites]
+  /// deletes one that does not match its body: a write in progress in this process
+  /// holds one for milliseconds, and a crash's is older than the process.
+  static const Duration _leftoverGrace = Duration(minutes: 1);
+
+  /// Finish or discard the writes a crash interrupted. Call it when a partition is
+  /// opened, beside [sweepTombstones].
+  ///
+  /// A write renames the body into place and then the sidecar, so a crash between
+  /// the two leaves a new body and the sidecar's temp file. A leftover sidecar temp
+  /// whose recorded identity matches the key's current body is that interrupted
+  /// write's, and is renamed into place, which completes it. Any other leftover
+  /// (its body was never promoted) is deleted once it is older than a minute.
+  /// Best-effort: a file it cannot handle is left, never a failed open.
+  ///
+  /// Walks the partition once, as [sweepTombstones] does on Windows.
+  Future<void> recoverInterruptedWrites() async {
+    checkNotDisposed();
+    final root = Directory(_baseDir);
+    if (!await root.exists()) return;
+    const marker = '$_sidecarSuffix$writeTempSuffix';
+    await for (final entity in root.list(recursive: true, followLinks: false)) {
+      if (entity is! File) continue;
+      final at = entity.path.indexOf(marker);
+      if (at <= 0) continue;
+      try {
+        final bodyPath = entity.path.substring(0, at);
+        if (await _sidecarMatchesBody(entity, File(bodyPath))) {
+          await _os.renameOver(entity, '$bodyPath$_sidecarSuffix');
+        } else if (DateTime.now().difference((await entity.stat()).modified) >
+            _leftoverGrace) {
+          await _os.deleteFile(entity);
+        }
+      } on FileSystemException {
+        // Left for the next open.
+      }
+    }
+  }
+
+  /// Whether [sidecar] records the identity of [body] as it is now.
+  Future<bool> _sidecarMatchesBody(File sidecar, File body) async {
+    final stat = await body.stat();
+    if (stat.type == FileSystemEntityType.notFound) return false;
+    try {
+      final meta = jsonDecode(await sidecar.readAsString());
+      return meta is Map &&
+          meta['size'] == stat.size &&
+          meta['bodyModified'] == stat.modified.toUtc().microsecondsSinceEpoch;
+    } catch (_) {
+      return false;
+    }
+  }
+
   static final Random _random = Random.secure();
 
   /// A fresh temp path beside [filePath]. The suffix is random, not a timestamp:
@@ -119,27 +172,60 @@ class FileSystemBackend with DisposeGuard implements StorageBackend {
   }
 
   /// Write an object atomically: [fill] writes the complete data into a temp file
-  /// beside [dest] and flushes it, and only then is the temp renamed over [dest].
+  /// beside the key and flushes it; the sidecar is written to a temp file of its
+  /// own, recording the body's identity (see [_writeSidecar]); and only when BOTH
+  /// are complete is the body renamed over the key, then the sidecar.
   ///
-  /// A rename replaces the destination in one step, so a reader, or a crash,
-  /// sees the previous object or the whole new one and nothing in between. If
-  /// [fill] or the rename fails the temp is removed and the destination is left
-  /// as it was; after a crash the temp stays behind, inert (listings skip it).
-  Future<void> _writeAtomically(
-    File dest,
-    Future<void> Function(File temp) fill,
-  ) async {
-    final temp = File(_writeTempPath(dest.path));
+  /// A rename replaces the destination in one step, so a reader, or a crash, sees
+  /// the previous object or the whole new one. The two renames are not one step,
+  /// so a crash between them leaves the new body beside the old sidecar; the
+  /// sidecar's identity no longer matches the body, so readers ignore it (see
+  /// [_readMeta]) and [recoverInterruptedWrites] finishes the pair at the next
+  /// open. If a step fails before the body is promoted, both temps are removed and
+  /// the key is as it was; after it, the sidecar's temp is kept for recovery.
+  Future<void> _commit(
+    String key,
+    Future<void> Function(File temp) fill, {
+    required String? contentType,
+    required Map<String, String> metadata,
+  }) async {
+    final dest = _file(key);
+    final tempBody = File(_writeTempPath(dest.path));
+    File? tempMeta;
+    var promoted = false;
     try {
-      await fill(temp);
-      await _os.renameOver(temp, dest.path);
-    } catch (_) {
-      try {
-        await _os.deleteFile(temp);
-      } on FileSystemException {
-        // The first failure is the one to report; an undeletable temp is inert.
+      await fill(tempBody);
+      if (_hasMetadata(contentType, metadata)) {
+        tempMeta = File(_writeTempPath(_metaFile(key).path));
+        await _writeSidecar(
+          tempMeta,
+          contentType,
+          metadata,
+          await tempBody.stat(),
+        );
       }
+      await _os.renameOver(tempBody, dest.path);
+      promoted = true;
+      if (tempMeta != null) {
+        await _os.renameOver(tempMeta, _metaFile(key).path);
+      } else {
+        // No metadata: an older sidecar belongs to the previous body.
+        await _os.deleteFile(_metaFile(key));
+      }
+    } catch (_) {
+      await _discardTemp(tempBody);
+      if (!promoted && tempMeta != null) await _discardTemp(tempMeta);
       rethrow;
+    }
+  }
+
+  /// Delete a temp file; the first failure is the one to report, and an
+  /// undeletable temp is inert.
+  Future<void> _discardTemp(File temp) async {
+    try {
+      await _os.deleteFile(temp);
+    } on FileSystemException {
+      // Inert: listings skip it and the open-time pass reaps it.
     }
   }
 
@@ -171,27 +257,31 @@ class FileSystemBackend with DisposeGuard implements StorageBackend {
     // after the source completes. A stream that errors (or a crash) must
     // never leave a readable partial object at the key — a torn cache
     // fill or interrupted upload would otherwise be served as complete.
-    await _writeAtomically(file, (temp) async {
-      final sink = temp.openWrite();
-      var bytesWritten = 0;
-      try {
-        await for (final chunk in byteStream) {
-          sink.add(chunk);
-          bytesWritten += chunk.length;
-          options.onProgress?.call(bytesWritten, null);
-        }
-        await sink.close();
-      } catch (_) {
+    await _commit(
+      key,
+      (temp) async {
+        final sink = temp.openWrite();
+        var bytesWritten = 0;
         try {
+          await for (final chunk in byteStream) {
+            sink.add(chunk);
+            bytesWritten += chunk.length;
+            options.onProgress?.call(bytesWritten, null);
+          }
           await sink.close();
-        } on FileSystemException {
-          // The sink may already be broken; the temp delete is what matters.
+        } catch (_) {
+          try {
+            await sink.close();
+          } on FileSystemException {
+            // The sink may already be broken; the temp delete is what matters.
+          }
+          rethrow;
         }
-        rethrow;
-      }
-      await _flushToDisk(temp);
-    });
-    await _writeMeta(key, options.contentType, options.metadata);
+        await _flushToDisk(temp);
+      },
+      contentType: options.contentType,
+      metadata: options.metadata,
+    );
   }
 
   @override
@@ -204,11 +294,12 @@ class FileSystemBackend with DisposeGuard implements StorageBackend {
     await _ensureBackupAttribute();
     final file = _file(key);
     await file.parent.create(recursive: true);
-    await _writeAtomically(
-      file,
+    await _commit(
+      key,
       (temp) => temp.writeAsBytes(bytes, flush: true),
+      contentType: options.contentType,
+      metadata: options.metadata,
     );
-    await _writeMeta(key, options.contentType, options.metadata);
   }
 
   // ── Read ──
@@ -266,7 +357,7 @@ class FileSystemBackend with DisposeGuard implements StorageBackend {
     final file = _file(key);
     if (!await file.exists()) return null;
     final stat = await file.stat();
-    final meta = await _readMeta(key);
+    final meta = await _readMeta(key, stat);
     return ObjectInfo(
       key: key,
       size: stat.size,
@@ -381,17 +472,23 @@ class FileSystemBackend with DisposeGuard implements StorageBackend {
     checkNotDisposed();
     final dest = _file(destKey);
     await dest.parent.create(recursive: true);
+    // The destination gets the source's content type and metadata, and nothing
+    // of its own previous object's (a source with none clears the key's).
+    final source = await _readMeta(sourceKey, await _file(sourceKey).stat());
     // dart:io removes an existing destination before copying onto it, so a
     // copy straight to the key could leave it truncated or gone. Copy beside it
     // and promote by rename, as every other write does.
-    await _writeAtomically(dest, (temp) async {
-      await _file(sourceKey).copy(temp.path);
-      await _flushToDisk(temp);
-    });
-    final srcMeta = _metaFile(sourceKey);
-    if (await srcMeta.exists()) {
-      await srcMeta.copy(_metaFile(destKey).path);
-    }
+    await _commit(
+      destKey,
+      (temp) async {
+        await _file(sourceKey).copy(temp.path);
+        await _flushToDisk(temp);
+      },
+      contentType: source?['contentType'] is String
+          ? source!['contentType'] as String
+          : null,
+      metadata: _castMetadata(source?['metadata']),
+    );
   }
 
   // ── Metadata update ──
@@ -403,37 +500,77 @@ class FileSystemBackend with DisposeGuard implements StorageBackend {
     Map<String, String> metadata = const {},
   }) async {
     checkNotDisposed();
-    await _writeMeta(key, contentType, metadata);
+    final stat = await _file(key).stat();
+    if (stat.type == FileSystemEntityType.notFound) {
+      throw FileNotFoundError(key);
+    }
+    if (!_hasMetadata(contentType, metadata)) {
+      await _os.deleteFile(_metaFile(key));
+      return;
+    }
+    // Written beside the sidecar and renamed over it, so a crash leaves the old
+    // sidecar or the new one, never a truncated one.
+    final temp = File(_writeTempPath(_metaFile(key).path));
+    try {
+      await _writeSidecar(temp, contentType, metadata, stat);
+      await _os.renameOver(temp, _metaFile(key).path);
+    } catch (_) {
+      await _discardTemp(temp);
+      rethrow;
+    }
   }
 
   // ── Internal: metadata sidecar ──
 
-  Future<void> _writeMeta(
-    String key,
+  static const String _sidecarSuffix = '.meta.json';
+
+  bool _hasMetadata(String? contentType, Map<String, String> metadata) =>
+      contentType != null || metadata.isNotEmpty;
+
+  /// Write [file] as a sidecar for a body whose `stat` is [body], flushed.
+  ///
+  /// Besides the content type and metadata (which cannot be derived from the
+  /// bytes), it records the body's identity: its size and modification time. A
+  /// rename preserves the modification time, so the identity of a finished temp
+  /// body is the identity of the key once it is promoted. [_readMeta] compares it
+  /// with the body on disk, so a sidecar that belongs to a different body is never
+  /// believed.
+  Future<void> _writeSidecar(
+    File file,
     String? contentType,
     Map<String, String> metadata,
+    FileStat body,
   ) async {
-    if (contentType == null && metadata.isEmpty) {
-      await _os.deleteFile(_metaFile(key));
-      return;
-    }
-    final metaFile = _metaFile(key);
-    await metaFile.parent.create(recursive: true);
-    await metaFile.writeAsString(
-      jsonEncode({'contentType': contentType, 'metadata': metadata}),
+    await file.parent.create(recursive: true);
+    await file.writeAsString(
+      jsonEncode({
+        'contentType': contentType,
+        'metadata': metadata,
+        'size': body.size,
+        'bodyModified': body.modified.toUtc().microsecondsSinceEpoch,
+      }),
       flush: true,
     );
   }
 
-  Future<Map<String, dynamic>?> _readMeta(String key) async {
+  /// The sidecar of [key], or null when there is none or it does not belong to the
+  /// body whose `stat` is [body].
+  ///
+  /// A sidecar that records an identity is believed only if the body still has that
+  /// size and modification time; otherwise it is the previous object's (a crash
+  /// between the two renames of a write) and reads as absent, never as wrong
+  /// metadata. A sidecar without one (written by cellar 1.0.0) is believed as it
+  /// always was. An unparseable one is deleted, as before.
+  Future<Map<String, dynamic>?> _readMeta(String key, FileStat body) async {
     final metaFile = _metaFile(key);
     if (!await metaFile.exists()) return null;
+    final Map<String, dynamic> meta;
     try {
-      return jsonDecode(await metaFile.readAsString()) as Map<String, dynamic>;
+      meta = jsonDecode(await metaFile.readAsString()) as Map<String, dynamic>;
     } catch (_) {
-      // Sidecar holds derived metadata; the body is the source of truth.
-      // Delete the unparseable sidecar so the next write rebuilds it
-      // cleanly, and treat this read as if no metadata existed.
+      // The body is the source of truth for its bytes, but not for its content
+      // type or metadata; those are lost with the sidecar. Delete the unparseable
+      // one so the next write rebuilds it cleanly, and read as if none existed.
       try {
         await metaFile.delete();
       } on FileSystemException {
@@ -441,6 +578,15 @@ class FileSystemBackend with DisposeGuard implements StorageBackend {
       }
       return null;
     }
+    final size = meta['size'];
+    final modified = meta['bodyModified'];
+    if (size is int && modified is int) {
+      final matches =
+          size == body.size &&
+          modified == body.modified.toUtc().microsecondsSinceEpoch;
+      if (!matches) return null;
+    }
+    return meta;
   }
 
   Map<String, String> _castMetadata(Object? raw) {

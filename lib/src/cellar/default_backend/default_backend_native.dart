@@ -41,6 +41,7 @@ Future<StorageBackend> initBackendForPartition({
   // Best-effort sweep of any tombstones left by a prior session
   // (Windows delete-while-open workaround). No-op on POSIX.
   await backend.sweepTombstones();
+  await backend.recoverInterruptedWrites();
   return backend;
 }
 
@@ -65,5 +66,6 @@ Future<StorageBackend> initDefaultBackend({
   }
   final backend = FileSystemBackend('${roots.support}/$name');
   await backend.sweepTombstones();
+  await backend.recoverInterruptedWrites();
   return backend;
 }

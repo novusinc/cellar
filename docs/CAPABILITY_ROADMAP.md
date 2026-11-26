@@ -41,7 +41,7 @@ maintenance recipes see [`UPDATING.md`](UPDATING.md).
 | Capability | Status | Notes |
 |---|---|---|
 | Atomic writes (temp + rename) | DONE | Crash mid-write leaves the previous object. `write`, `writeStream` and `copy` all write a complete, flushed temp beside the key and rename it over; pinned by crash-injection tests through the `FileSystemOs` seam |
-| Sidecar metadata (`.meta.json`) with silent rebuild | DONE | Body is truth; unparseable sidecar deleted + rebuilt on next write |
+| Sidecar metadata (`.meta.json`) with silent rebuild | DONE | Written to a temp and renamed, together with the body's identity (size + modified time); a sidecar that does not match its body reads as absent, never as another object's metadata; `recoverInterruptedWrites()` at open finishes a write a crash interrupted between the two renames; an unparseable sidecar is deleted + rebuilt on next write; sidecars from 1.0.0 (no identity) are still read |
 | Windows tombstoned deletes + `sweepTombstones` | DONE | Real-OS leg in the CI matrix; `delete()` succeeds immediately on every OS |
 | Backup exclusion (iOS `kCFURLIsExcludedFromBackupKey` via CFURL FFI · macOS tmutil) | DONE | Via the `FileSystemOs` seam; survives `wipePartition` (the wipe deletes children, never the attributed root); failures degrade to backed-up, never fail a write |
 | OS seam (`FileSystemOs` + per-OS overrides, injectable) | DONE | The package's only `Platform.isX` branches live in `current()` |
