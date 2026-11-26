@@ -22,6 +22,7 @@ import '../batteries/stack_battery.dart';
 import '../harness/fake_encryptor.dart';
 import '../platform/web/indexed_db_blob_battery.dart';
 import '../platform/web/indexed_db_list_battery.dart';
+import '../platform/web/indexed_db_quota_battery.dart';
 
 import 'package:cellar/cellar_lowlevel.dart';
 
@@ -66,4 +67,5 @@ void main() {
   );
   runIndexedDbBlobBattery();
   runIndexedDbListBattery();
+  runIndexedDbQuotaBattery();
 }

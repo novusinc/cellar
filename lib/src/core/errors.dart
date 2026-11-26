@@ -122,7 +122,11 @@ class InvalidKeyError extends StorageError {
   String toString() => 'InvalidKeyError($key): $message';
 }
 
-/// A write operation failed (disk full, permission denied, etc.).
+/// A write operation failed (permission denied, a broken transport, storage
+/// full, etc.).
+///
+/// When storage is full the more specific [QuotaExceededError] is thrown, so a
+/// handler for [WriteError] still matches it.
 class WriteError extends StorageError {
   /// [key] is the object whose write failed; [cause] the transport or
   /// filesystem error underneath.
@@ -134,4 +138,19 @@ class WriteError extends StorageError {
   @override
   String toString() =>
       'WriteError($key${cause != null ? ', cause: $cause' : ''})';
+}
+
+/// A write failed because storage is full: the browser's quota for the origin.
+///
+/// A [WriteError], so existing handlers still match. It is the one write failure a
+/// caller can do something about: free space (evict, or `Cellar.makeRoom`) and try
+/// again. Nothing of the failed write is left readable; the key holds whatever it
+/// held before.
+class QuotaExceededError extends WriteError {
+  /// [key] is the object whose write failed; [cause] the browser's error.
+  const QuotaExceededError(super.key, {super.cause});
+
+  @override
+  String toString() =>
+      'QuotaExceededError($key${cause != null ? ', cause: $cause' : ''})';
 }

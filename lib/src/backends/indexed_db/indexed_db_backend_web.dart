@@ -179,17 +179,65 @@ class _RawIndexedDbBackend with DisposeGuard implements SuffixListableBackend {
     return tx.objectStore(_storeName);
   }
 
-  Future<JSAny?> _request(web.IDBRequest request) {
+  /// Resolves with [request]'s result. A failure is mapped by [_failure], using
+  /// [key] for the typed error.
+  Future<JSAny?> _request(web.IDBRequest request, {String? key}) {
     final completer = Completer<JSAny?>();
     request.onsuccess = (web.Event event) {
       completer.complete(request.result);
     }.toJS;
     request.onerror = (web.Event event) {
-      completer.completeError(
-        StateError('IndexedDB request failed: ${request.error?.message}'),
-      );
+      completer.completeError(_failure(key, request.error, 'request'));
     }.toJS;
     return completer.future;
+  }
+
+  /// The error for a failed request or aborted transaction: a [QuotaExceededError]
+  /// when the browser says storage is full, a [StateError] otherwise (as before).
+  Object _failure(String? key, web.DOMException? error, String what) {
+    if (error?.name == 'QuotaExceededError') {
+      return QuotaExceededError(key ?? '', cause: error?.message);
+    }
+    return StateError('IndexedDB $what failed: ${error?.message}');
+  }
+
+  /// A read-write transaction whose end is observable: [_WriteTransaction.done]
+  /// completes when the browser has COMMITTED it, and fails if it aborts.
+  ///
+  /// A request's success only means the browser accepted the operation. The commit
+  /// comes later, and that is where a full quota shows up, as an abort. Returning
+  /// at the request's success would report a write that is not stored.
+  Future<_WriteTransaction> _writeTransaction(String key) async {
+    final db = await _getDb();
+    final tx = db.transaction(_storeName.toJS, 'readwrite');
+    final done = Completer<void>();
+    // A failure is for whoever awaits [done]; one nobody awaits (the request that
+    // failed already threw) must not take the zone down.
+    done.future.ignore();
+    tx.oncomplete = (web.Event event) {
+      done.complete();
+    }.toJS;
+    tx.onabort = (web.Event event) {
+      done.completeError(_failure(key, tx.error, 'transaction'));
+    }.toJS;
+    return _WriteTransaction(tx.objectStore(_storeName), done.future);
+  }
+
+  /// Starts a request with [start] and waits for it, turning a quota failure that
+  /// the browser throws synchronously into a [QuotaExceededError] too.
+  Future<JSAny?> _send(String key, web.IDBRequest Function() start) async {
+    try {
+      return await _request(start(), key: key);
+    } on StorageError {
+      rethrow;
+    } catch (e) {
+      // dart2js and dart2wasm both give a thrown DOMException a toString of
+      // "<name>: <message>".
+      if (e.toString().contains('QuotaExceededError')) {
+        throw QuotaExceededError(key, cause: e);
+      }
+      rethrow;
+    }
   }
 
   // ── Write ──
@@ -200,9 +248,10 @@ class _RawIndexedDbBackend with DisposeGuard implements SuffixListableBackend {
     Uint8List bytes, [
     WriteOptions options = const WriteOptions(),
   ]) async {
-    final store = await _store('readwrite');
+    final tx = await _writeTransaction(key);
     final record = _buildRecord(bytes, options.contentType, options.metadata);
-    await _request(store.put(record, key.toJS));
+    await _send(key, () => tx.store.put(record, key.toJS));
+    await tx.done;
   }
 
   @override
@@ -270,14 +319,16 @@ class _RawIndexedDbBackend with DisposeGuard implements SuffixListableBackend {
 
   @override
   Future<void> delete(String key) async {
-    final store = await _store('readwrite');
-    await _request(store.delete(key.toJS));
+    final tx = await _writeTransaction(key);
+    await _send(key, () => tx.store.delete(key.toJS));
+    await tx.done;
   }
 
   @override
   Future<void> deletePrefix(String prefix) async {
     final keyRange = web.IDBKeyRange.bound(prefix.toJS, '$prefix\uffff'.toJS);
-    final store = await _store('readwrite');
+    final tx = await _writeTransaction(prefix);
+    final store = tx.store;
     final cursorRequest = store.openKeyCursor(keyRange);
 
     final completer = Completer<void>();
@@ -297,6 +348,7 @@ class _RawIndexedDbBackend with DisposeGuard implements SuffixListableBackend {
       );
     }.toJS;
     await completer.future;
+    await tx.done;
   }
 
   // ── List ──
@@ -381,8 +433,9 @@ class _RawIndexedDbBackend with DisposeGuard implements SuffixListableBackend {
     final store = await _store('readonly');
     final result = await _request(store.get(sourceKey.toJS));
     if (result == null) throw FileNotFoundError(sourceKey);
-    final writeStore = await _store('readwrite');
-    await _request(writeStore.put(result, destKey.toJS));
+    final tx = await _writeTransaction(destKey);
+    await _send(destKey, () => tx.store.put(result, destKey.toJS));
+    await tx.done;
   }
 
   // ── Metadata update ──
@@ -395,8 +448,9 @@ class _RawIndexedDbBackend with DisposeGuard implements SuffixListableBackend {
   }) async {
     // One read-write transaction (get, then put): IndexedDB transactions are
     // atomic across tabs, so no writer can slip in between the two.
-    final store = await _store('readwrite');
-    final result = await _request(store.get(key.toJS));
+    final tx = await _writeTransaction(key);
+    final store = tx.store;
+    final result = await _request(store.get(key.toJS), key: key);
     if (result == null) throw FileNotFoundError(key);
 
     final bytes = _extractBody(key, result);
@@ -410,7 +464,8 @@ class _RawIndexedDbBackend with DisposeGuard implements SuffixListableBackend {
       metadata,
       writtenAt: writtenAt.isA<JSNumber>() ? writtenAt : null,
     );
-    await _request(store.put(record, key.toJS));
+    await _send(key, () => store.put(record, key.toJS));
+    await tx.done;
   }
 
   // ── Materialize — never called on this layer ──
@@ -512,6 +567,17 @@ class _RawIndexedDbBackend with DisposeGuard implements SuffixListableBackend {
       lastModified: lastModified,
     );
   }
+}
+
+/// A read-write transaction: its store, and a future for its commit.
+class _WriteTransaction {
+  _WriteTransaction(this.store, this.done);
+
+  final web.IDBObjectStore store;
+
+  /// Completes when the browser has committed the transaction; fails with the
+  /// mapped error (a [QuotaExceededError] for a full quota) if it aborts.
+  final Future<void> done;
 }
 
 /// Typed view of the compound record [_RawIndexedDbBackend] stores.
