@@ -17,6 +17,7 @@ import '../batteries/forwarding_battery.dart';
 import '../batteries/metadata_keys_battery.dart';
 import '../batteries/scope_battery.dart';
 import '../batteries/stack_battery.dart';
+import '../batteries/verifying_battery.dart';
 import '../harness/fake_encryptor.dart';
 
 import 'package:cellar/cellar_lowlevel.dart';
@@ -52,5 +53,21 @@ void main() {
   runEvictionBattery();
   runBudgetBattery();
   runMetadataKeysBattery();
+
+  // ── VerifyingBackend over each stack the runner can host ──
+  runVerifyingBattery('InMemoryBackend', create: InMemoryBackend.new);
+  runVerifyingBattery(
+    'ChunkedBackend over InMemory',
+    create: () =>
+        ChunkedBackend(backing: InMemoryBackend(), chunkSize: 64 * 1024),
+  );
+  runVerifyingBattery(
+    'EncryptedBackend over ChunkedBackend over InMemory',
+    create: () => EncryptedBackend(
+      inner: ChunkedBackend(backing: InMemoryBackend(), chunkSize: 64),
+      encryptor: FakeEncryptor(),
+      keyResolver: const FixedKeyResolver('verify-key'),
+    ),
+  );
   runStackBattery();
 }

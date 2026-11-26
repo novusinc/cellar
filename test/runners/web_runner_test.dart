@@ -20,6 +20,7 @@ import '../batteries/forwarding_battery.dart';
 import '../batteries/metadata_keys_battery.dart';
 import '../batteries/scope_battery.dart';
 import '../batteries/stack_battery.dart';
+import '../batteries/verifying_battery.dart';
 import '../harness/fake_encryptor.dart';
 import '../platform/web/indexed_db_blob_battery.dart';
 import '../platform/web/indexed_db_list_battery.dart';
@@ -58,6 +59,22 @@ void main() {
   runEvictionBattery();
   runBudgetBattery();
   runMetadataKeysBattery();
+
+  // ── VerifyingBackend over each stack the runner can host ──
+  runVerifyingBattery('InMemoryBackend', create: InMemoryBackend.new);
+  runVerifyingBattery(
+    'ChunkedBackend over InMemory',
+    create: () =>
+        ChunkedBackend(backing: InMemoryBackend(), chunkSize: 64 * 1024),
+  );
+  runVerifyingBattery(
+    'EncryptedBackend over ChunkedBackend over InMemory',
+    create: () => EncryptedBackend(
+      inner: ChunkedBackend(backing: InMemoryBackend(), chunkSize: 64),
+      encryptor: FakeEncryptor(),
+      keyResolver: const FixedKeyResolver('verify-key'),
+    ),
+  );
   runStackBattery();
 
   // ── Browser-only: the substrate a VM cannot host ──
@@ -68,6 +85,10 @@ void main() {
     supportsMaterialize: true,
   );
   runIndexedDbBlobBattery();
+  runVerifyingBattery(
+    'IndexedDbBackend',
+    create: () => IndexedDbBackend(dbName: 'cellar_verifying_${dbCounter++}'),
+  );
   runIndexedDbListBattery();
   runIndexedDbQuotaBattery();
 }

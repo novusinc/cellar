@@ -73,6 +73,14 @@ export 'src/decorators/chunked/chunked_backend.dart'
     show ChunkedBackend, ChunkedManifest, SuffixListableBackend;
 export 'src/decorators/forwarding/forwarding_backend.dart'
     show ForwardingBackend;
+export 'src/decorators/verifying/content_digester.dart'
+    show ContentDigester, ContentDigestSession;
+export 'src/decorators/verifying/verifying_backend.dart'
+    show
+        VerifyingBackend,
+        contentDigestAlgorithmMetadataKey,
+        contentDigestMetadataKey,
+        contentSizeMetadataKey;
 
 // Key scoping — Cellar uses one StorageScope per partition, but you
 // can wire your own.
