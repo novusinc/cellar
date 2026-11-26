@@ -122,6 +122,49 @@ class InvalidKeyError extends StorageError {
   String toString() => 'InvalidKeyError($key): $message';
 }
 
+/// What a [ContentVerificationError] found wrong with an object's content.
+enum ContentVerificationFailure {
+  /// The bytes are not the length they were expected to be.
+  size,
+
+  /// The bytes are the expected length but their digest is not the expected one.
+  digest,
+}
+
+/// An object's content is not what it was expected to be: a write whose bytes
+/// do not match the size and digest its caller said they must have (nothing is
+/// stored), or a stored object that is no longer the length it was verified at
+/// (a truncated or torn file), or whose digest no longer matches.
+///
+/// A [CorruptedFileError]: the content is not intact. It is a subtype so that
+/// code that already handles that case (including an exhaustive `switch` over the
+/// sealed [StorageError]) handles this one too.
+class ContentVerificationError extends CorruptedFileError {
+  /// [key] is the object; [failure] says what differed.
+  const ContentVerificationError(
+    super.key,
+    this.failure, {
+    this.expected,
+    this.actual,
+  });
+
+  /// Whether the length or the digest is wrong.
+  final ContentVerificationFailure failure;
+
+  /// What was expected: a byte count for [ContentVerificationFailure.size], the
+  /// digest for [ContentVerificationFailure.digest].
+  final String? expected;
+
+  /// What was found, spelled the same way as [expected]. For a write that was
+  /// stopped as soon as it was too long, the bytes seen so far.
+  final String? actual;
+
+  @override
+  String toString() =>
+      'ContentVerificationError($key, ${failure.name}, expected: $expected, '
+      'actual: $actual)';
+}
+
 /// A write operation failed (permission denied, a broken transport, storage
 /// full, etc.).
 ///
