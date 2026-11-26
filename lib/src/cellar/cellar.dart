@@ -634,6 +634,7 @@ class Cellar {
           osBackup: osBackup,
         );
         await local.sweepTombstones();
+        await local.recoverInterruptedWrites();
         return local;
       case _Origin.withBackends:
         return _providedBackends![partition]!;
