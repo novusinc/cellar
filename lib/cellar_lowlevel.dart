@@ -70,7 +70,7 @@ export 'src/decorators/encrypted/encryption_key_resolver.dart'
 // Decorators — wrap any backend.
 export 'src/decorators/encrypted/encrypted_backend.dart' show EncryptedBackend;
 export 'src/decorators/chunked/chunked_backend.dart'
-    show ChunkedBackend, ChunkedManifest;
+    show ChunkedBackend, ChunkedManifest, SuffixListableBackend;
 export 'src/decorators/forwarding/forwarding_backend.dart'
     show ForwardingBackend;
 

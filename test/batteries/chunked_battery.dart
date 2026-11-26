@@ -18,6 +18,69 @@ void runChunkedBattery() {
     Uint8List seq(int n) =>
         Uint8List.fromList(List.generate(n, (i) => i % 256));
 
+    group('list over a backing that can list by suffix', () {
+      test('uses it, and reads no chunk record', () async {
+        final spy = _SuffixSpyBacking();
+        final over = ChunkedBackend(backing: spy, chunkSize: chunkSize);
+        await over.write(
+          'a',
+          seq(200),
+          const WriteOptions(contentType: 'x/y', metadata: {'k': 'v'}),
+        );
+        await over.write('b', seq(10));
+        spy.reads.clear();
+
+        final listed = await over.list('');
+
+        expect(listed.map((i) => (i.key, i.size)).toSet(), {
+          ('a', 200),
+          ('b', 10),
+        });
+        expect(listed.firstWhere((i) => i.key == 'a').contentType, 'x/y');
+        expect(listed.firstWhere((i) => i.key == 'a').metadata, {'k': 'v'});
+        expect(spy.listCalls, 0, reason: 'plain list reads every record');
+        expect(spy.suffixCalls, [('', '__manifest')]);
+        expect(spy.reads, isEmpty, reason: 'nothing was read to answer');
+      });
+
+      test('gives the same answer as a backing that cannot', () async {
+        final plain = ChunkedBackend(
+          backing: InMemoryBackend(),
+          chunkSize: chunkSize,
+        );
+        final suffix = ChunkedBackend(
+          backing: _SuffixSpyBacking(),
+          chunkSize: chunkSize,
+        );
+        for (final over in [plain, suffix]) {
+          await over.write(
+            'd/one',
+            seq(130),
+            const WriteOptions(metadata: {'a': 'b'}),
+          );
+          await over.write('d/two', seq(5));
+          await over.write('e/three', seq(70));
+        }
+
+        // A Map has no value equality, so compare what each listing says as text.
+        Future<List<String>> described(
+          ChunkedBackend over,
+          String prefix,
+        ) async => [
+          for (final i in await over.list(prefix))
+            '${i.key}|${i.size}|${i.contentType}|${i.metadata}',
+        ]..sort();
+
+        for (final prefix in ['', 'd/', 'd/o', 'e', 'zzz']) {
+          expect(
+            await described(suffix, prefix),
+            await described(plain, prefix),
+            reason: 'prefix "$prefix"',
+          );
+        }
+      });
+    });
+
     group('overwrite reclaims orphan chunks', () {
       test('write shrink deletes the tail chunks', () async {
         await chunked.write('k', seq(200)); // 4 chunks + manifest = 5 records
@@ -209,4 +272,41 @@ void runChunkedBattery() {
       });
     });
   });
+}
+
+/// An in-memory backing that can list by suffix, and records what it is asked.
+class _SuffixSpyBacking extends ForwardingBackend
+    implements SuffixListableBackend {
+  _SuffixSpyBacking() : super(InMemoryBackend());
+
+  int listCalls = 0;
+  final List<(String, String)> suffixCalls = [];
+  final List<String> reads = [];
+
+  @override
+  Future<List<ObjectInfo>> list(String prefix) {
+    listCalls++;
+    return super.list(prefix);
+  }
+
+  @override
+  Future<List<ObjectInfo>> listEndingWith(String prefix, String suffix) async {
+    suffixCalls.add((prefix, suffix));
+    return [
+      for (final info in await inner.list(prefix))
+        if (info.key.endsWith(suffix)) info,
+    ];
+  }
+
+  @override
+  Future<Uint8List> read(String key) {
+    reads.add(key);
+    return super.read(key);
+  }
+
+  @override
+  Future<ObjectInfo?> head(String key) {
+    reads.add(key);
+    return super.head(key);
+  }
 }
