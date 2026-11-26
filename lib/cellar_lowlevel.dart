@@ -73,6 +73,8 @@ export 'src/decorators/encrypted/encryption_key_resolver.dart'
 export 'src/decorators/encrypted/encrypted_backend.dart' show EncryptedBackend;
 export 'src/decorators/chunked/chunked_backend.dart'
     show ChunkedBackend, ChunkedManifest, SuffixListableBackend;
+export 'src/decorators/access/access_tracking_backend.dart'
+    show AccessTrackingBackend;
 export 'src/decorators/forwarding/forwarding_backend.dart'
     show ForwardingBackend;
 export 'src/decorators/verifying/content_digester.dart'

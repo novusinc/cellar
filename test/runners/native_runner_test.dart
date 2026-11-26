@@ -7,6 +7,7 @@
 library;
 
 import '../batteries/cellar_battery.dart';
+import '../batteries/access_tracking_battery.dart';
 import '../batteries/budget_battery.dart';
 import '../batteries/chunked_battery.dart';
 import '../batteries/conformance_battery.dart';
@@ -53,6 +54,14 @@ void main() {
   runEvictionBattery();
   runBudgetBattery();
   runMetadataKeysBattery();
+
+  // ── AccessTrackingBackend over each stack the runner can host ──
+  runAccessTrackingBattery('InMemoryBackend', create: InMemoryBackend.new);
+  runAccessTrackingBattery(
+    'ChunkedBackend over InMemory',
+    create: () =>
+        ChunkedBackend(backing: InMemoryBackend(), chunkSize: 64 * 1024),
+  );
 
   // ── VerifyingBackend over each stack the runner can host ──
   runVerifyingBattery('InMemoryBackend', create: InMemoryBackend.new);
