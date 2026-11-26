@@ -70,9 +70,16 @@ class ObjectInfo {
   ///
   /// **Always non-null. No exceptions, no fallbacks.**
   ///
+  /// It is when the object's BYTES were last written, on every backend:
+  /// `updateMetadata` leaves it alone, so changing an object's metadata never
+  /// restarts its `maxAge` or reorders its eviction. A write, a stream write and
+  /// a copy to this key set it.
+  ///
   /// Per-backend source:
-  ///   - Local: filesystem `stat.modified`
-  ///   - IndexedDB: `writtenAt` field cellar writes on every put
+  ///   - Local: filesystem `stat.modified` of the body (a sidecar update does not
+  ///     touch the body)
+  ///   - IndexedDB: `writtenAt` field cellar writes on every put of the bytes,
+  ///     and carries forward on a metadata update
   ///     (IDB has no native timestamp; cellar maintains it)
   ///
   /// If a backend cannot deliver this, the backend is broken — fix it.

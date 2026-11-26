@@ -207,6 +207,30 @@ void runStorageBackendConformance(
 
     // ── updateMetadata — replace semantics ──────────────────────────────
     group('updateMetadata', () {
+      test('keeps lastModified: it is when the bytes were written', () async {
+        await backend.write('m', bytes('body'));
+        final before = (await backend.head('m'))!.lastModified;
+
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        await backend.updateMetadata(
+          'm',
+          contentType: 'a/b',
+          metadata: {'k': 'v'},
+        );
+
+        final after = await backend.head('m');
+        expect(after!.metadata['k'], 'v');
+        expect(
+          after.lastModified,
+          before,
+          reason:
+              'changing metadata is not writing: it must not restart maxAge '
+              'or reorder eviction, on any backend',
+        );
+        final listed = (await backend.list('m')).single;
+        expect(listed.lastModified, before, reason: 'list agrees with head');
+      });
+
       test('replaces contentType + metadata and leaves bytes intact', () async {
         await backend.write(
           'u',
