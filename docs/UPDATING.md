@@ -51,6 +51,9 @@ trust memory or docs):
    from pana's walk; check its pubspec and barrel imports BEFORE
    importing it.
 6. Roadmap section + changelog entry.
+7. Any metadata key the backend adds of its own uses the `cellar.` prefix
+   (`core/metadata_keys.dart`); `reserved_prefix_battery.dart` fails when a
+   backend or decorator stores an unprefixed one.
 
 ## S3 — Add a decorator
 
@@ -58,7 +61,9 @@ Same as a backend but under `lib/src/decorators/<name>/`: implement
 `StorageBackend`, wrap `inner`, never dispose what you didn't create.
 Conformance-run it over `InMemoryBackend` in both runners (the
 chunked/encrypted invocations are the template). If it composes with
-others, add a stack to `stack_battery.dart`.
+others, add a stack to `stack_battery.dart`. If it writes metadata of its own,
+every key uses the `cellar.` prefix, and the stack is added to
+`reserved_prefix_battery.dart`, which checks that nothing unprefixed is stored.
 
 ## S4 — Add a facade method
 

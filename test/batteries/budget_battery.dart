@@ -49,12 +49,18 @@ void runBudgetBattery() {
       Map<String, Map<String, String>> metadata = const {},
     }) async {
       for (final entry in secondsByKey.entries) {
-        await cellar.write(
-          entry.key,
-          Uint8List(10),
-          partition: partition,
-          metadata: metadata[entry.key] ?? const {},
-        );
+        final tags = metadata[entry.key];
+        if (tags == null) {
+          await cellar.write(entry.key, Uint8List(10), partition: partition);
+        } else {
+          // cellar.* keys are cellar's: the facade ignores a caller's, so they are
+          // written the way a decorator writes them, beneath it.
+          await backing.write(
+            entry.key,
+            Uint8List(10),
+            WriteOptions(metadata: tags),
+          );
+        }
         backing.setLastModified(
           entry.key,
           DateTime.utc(2020, 1, 1, 0, 0, entry.value),
