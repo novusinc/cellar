@@ -54,7 +54,7 @@ maintenance recipes see [`UPDATING.md`](UPDATING.md).
 | Capability | Status | Notes |
 |---|---|---|
 | One database per partition; atomic `wipePartition` | DONE | `deleteDatabase` per partition |
-| Chunked records + manifest-last crash safety | DONE | Generation-tagged so torn writes never mix generations |
+| Chunked records + manifest-last crash safety | DONE | Generation-tagged so torn writes never mix generations. A failed write removes its chunks at once; leftovers of a crash are swept by the next write of the key, and a delete removes the manifest first and then every generation of the key by prefix, so no record outlives it |
 | `list` reads manifest records only | DONE | A keys-only cursor finds the manifests and only those records are read (`SuffixListableBackend`), so a listing no longer reads every stored byte; pinned in real Chrome by counting the browser's own IndexedDB calls |
 | `QuotaExceededError` on a full browser quota | DONE | A typed `WriteError` subtype, so a caller can free space (`Cellar.makeRoom`, eviction) and retry. Mapped from the browser's `QuotaExceededError` whether it is thrown by `put`, fails the request, or aborts the transaction; writes now wait for the transaction to COMMIT, since a quota failure arrives at commit and a write reported at the request's success was not necessarily stored. Native disk-full is not mapped yet |
 | `writtenAt` stamping (`lastModified` non-null on web) | DONE | Missing field = corruption, not compat. `updateMetadata` carries the record's `writtenAt` forward (in the same read-write transaction), so `lastModified` is when the bytes were written on every backend, as on native; a conformance case pins it for every backend |

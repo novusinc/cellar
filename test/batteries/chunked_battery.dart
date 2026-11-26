@@ -18,6 +18,135 @@ void runChunkedBattery() {
     Uint8List seq(int n) =>
         Uint8List.fromList(List.generate(n, (i) => i % 256));
 
+    group('a write that fails leaves no unreferenced chunks', () {
+      late InMemoryBackend store;
+      late _FlakyBacking flaky;
+      late ChunkedBackend over;
+
+      setUp(() {
+        store = InMemoryBackend();
+        flaky = _FlakyBacking(store);
+        over = ChunkedBackend(backing: flaky, chunkSize: chunkSize);
+      });
+
+      test('a failed overwrite is reclaimed at once, and the previous object '
+          'survives', () async {
+        await over.write('k', seq(10)); // manifest + one chunk
+        flaky.failChunkPutsAfter = 2;
+
+        await expectLater(over.write('k', seq(300)), throwsA(isA<_Boom>()));
+
+        expect(
+          store.objectCount,
+          2,
+          reason: 'only the previous object\'s records',
+        );
+        expect(await over.read('k'), seq(10));
+      });
+
+      test('a failed streamed overwrite is reclaimed too', () async {
+        await over.write('k', seq(10));
+        Stream<List<int>> dying() async* {
+          yield seq(150);
+          throw _Boom();
+        }
+
+        await expectLater(
+          over.writeStream('k', dying()),
+          throwsA(isA<_Boom>()),
+        );
+
+        expect(store.objectCount, 2);
+        expect(await over.read('k'), seq(10));
+      });
+
+      test('chunks a crash left behind are overwritten, and the tail of a '
+          'longer failed attempt does not outlive a shorter write', () async {
+        await over.write('k', seq(10));
+        // A failure whose cleanup also fails stands in for a crash: the failed
+        // attempt's chunks stay.
+        flaky.failChunkPutsAfter = 4;
+        flaky.failDeletes = true;
+        await expectLater(over.write('k', seq(500)), throwsA(isA<_Boom>()));
+        expect(store.objectCount, greaterThan(2), reason: 'the leak exists');
+        flaky.failChunkPutsAfter = null;
+        flaky.failDeletes = false;
+
+        await over.write(
+          'k',
+          seq(10),
+        ); // one chunk, shorter than the failed one
+
+        expect(
+          store.objectCount,
+          2,
+          reason: 'manifest + one chunk, nothing else',
+        );
+        expect(await over.read('k'), seq(10));
+      });
+
+      test('deleting removes every generation of the key', () async {
+        await over.write('k', seq(10));
+        flaky.failChunkPutsAfter = 4;
+        flaky.failDeletes = true;
+        await expectLater(over.write('k', seq(500)), throwsA(isA<_Boom>()));
+        flaky.failChunkPutsAfter = null;
+        flaky.failDeletes = false;
+
+        await over.delete('k');
+
+        expect(store.objectCount, 0, reason: 'no record of the key remains');
+      });
+
+      test(
+        'a first write that fails and is then deleted leaves nothing',
+        () async {
+          flaky.failChunkPutsAfter = 3;
+          flaky.failDeletes = true;
+          await expectLater(over.write('k', seq(500)), throwsA(isA<_Boom>()));
+          flaky.failChunkPutsAfter = null;
+          flaky.failDeletes = false;
+
+          await over.delete('k');
+
+          expect(store.objectCount, 0);
+        },
+      );
+
+      test(
+        'a deletion that fails part-way has already removed the object',
+        () async {
+          await over.write('k', seq(200));
+          flaky.failDeletes = true;
+
+          await expectLater(over.delete('k'), throwsA(isA<_Boom>()));
+          flaky.failDeletes = false;
+
+          // The manifest went first, so nothing can read a half-deleted object.
+          expect(await over.exists('k'), isFalse);
+          await expectLater(over.read('k'), throwsA(isA<FileNotFoundError>()));
+          // What is left is unreferenced, and the next write of the key sweeps it.
+          await over.write('k', seq(10));
+          expect(store.objectCount, 2);
+        },
+      );
+
+      test(
+        'a failed copy is reclaimed, and the destination keeps its object',
+        () async {
+          await over.write('src', seq(300));
+          await over.write('dst', seq(10));
+          final before = store.objectCount;
+          flaky.failChunkPutsAfter = 2;
+
+          await expectLater(over.copy('src', 'dst'), throwsA(isA<_Boom>()));
+
+          expect(store.objectCount, before);
+          expect(await over.read('dst'), seq(10));
+        },
+      );
+    });
+
     group('list over a backing that can list by suffix', () {
       test('uses it, and reads no chunk record', () async {
         final spy = _SuffixSpyBacking();
@@ -308,5 +437,52 @@ class _SuffixSpyBacking extends ForwardingBackend
   Future<ObjectInfo?> head(String key) {
     reads.add(key);
     return super.head(key);
+  }
+}
+
+/// A failure the tests cause on purpose.
+class _Boom implements Exception {
+  @override
+  String toString() => 'boom';
+}
+
+/// A backing whose chunk writes can start failing, and whose deletions can fail,
+/// to stand in for a full quota and for a crash.
+class _FlakyBacking extends ForwardingBackend {
+  _FlakyBacking(InMemoryBackend super.inner);
+
+  /// Chunk records that may still be written before every further one fails;
+  /// null for no failure.
+  int? failChunkPutsAfter;
+
+  /// Whether deletions (of chunks and by prefix) fail.
+  bool failDeletes = false;
+
+  int _chunkPuts = 0;
+
+  @override
+  Future<void> write(
+    String key,
+    Uint8List bytes, [
+    WriteOptions options = const WriteOptions(),
+  ]) {
+    if (key.contains('__c')) {
+      _chunkPuts++;
+      final limit = failChunkPutsAfter;
+      if (limit != null && _chunkPuts > limit) throw _Boom();
+    }
+    return super.write(key, bytes, options);
+  }
+
+  @override
+  Future<void> delete(String key) {
+    if (failDeletes && key.contains('__c')) throw _Boom();
+    return super.delete(key);
+  }
+
+  @override
+  Future<void> deletePrefix(String prefix) {
+    if (failDeletes && prefix.contains('__g')) throw _Boom();
+    return super.deletePrefix(prefix);
   }
 }
