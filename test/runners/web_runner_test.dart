@@ -18,6 +18,7 @@ import '../batteries/core_battery.dart';
 import '../batteries/encrypted_battery.dart';
 import '../batteries/eviction_battery.dart';
 import '../batteries/forwarding_battery.dart';
+import '../batteries/hooks_battery.dart';
 import '../batteries/metadata_keys_battery.dart';
 import '../batteries/reserved_prefix_battery.dart';
 import '../batteries/scope_battery.dart';
@@ -72,6 +73,14 @@ void main() {
         ChunkedBackend(backing: InMemoryBackend(), chunkSize: 64 * 1024),
   );
 
+  // ── HookedBackend over each stack the runner can host ──
+  runHooksBattery('InMemoryBackend', create: InMemoryBackend.new);
+  runHooksBattery(
+    'ChunkedBackend over InMemory',
+    create: () =>
+        ChunkedBackend(backing: InMemoryBackend(), chunkSize: 64 * 1024),
+  );
+
   // ── VerifyingBackend over each stack the runner can host ──
   runVerifyingBattery('InMemoryBackend', create: InMemoryBackend.new);
   runVerifyingBattery(
@@ -97,6 +106,10 @@ void main() {
     supportsMaterialize: true,
   );
   runIndexedDbBlobBattery();
+  runHooksBattery(
+    'IndexedDbBackend',
+    create: () => IndexedDbBackend(dbName: 'cellar_hooks_${dbCounter++}'),
+  );
   runAccessTrackingBattery(
     'IndexedDbBackend',
     create: () => IndexedDbBackend(dbName: 'cellar_access_${dbCounter++}'),
