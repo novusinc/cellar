@@ -82,6 +82,7 @@ maintenance recipes see [`UPDATING.md`](UPDATING.md).
 | Named partitions + `PartitionConfig` | DONE | Name grammar validated at construction; `system_` reserved |
 | `keyPrefix` tenant scoping, scope-relative results | DONE | Listed keys round-trip into `read()` unchanged |
 | Lifecycle (maxBytes / maxAge / wipeOnOpen / runInterval / osManaged) | DONE | Eviction-error resilience via `onEvictionError`; `runLifecycleNow()` on demand; injectable clock |
+| Pluggable eviction order, `canEvict`, `evictionGuard`, `onEvicted` | DONE | `EvictionPolicy` orders the objects a partition evicts when over `maxBytes`: `oldestWritten` (default, what cellar always did), `leastRecentlyUsed`, `leastFrequentlyUsed`, or your own subclass; `canEvict` exempts an object (an app's pins); `evictionGuard` wraps each delete so an app can lock and re-check the object first (a pass lists, then deletes by key); `onEvicted` reports. LRU and LFU read `cellar.accessedAt` / `cellar.accessCount` metadata, which nothing writes until access tracking exists; absent, they fall back to `lastModified` |
 | Cross-partition copy / move / `movePartition` filter | DONE | Streams through, metadata carried |
 | Materialize with `decrypt` / `exclusive` axes | DONE | Path on native, Blob URL on web; live handles survive deletes |
 | `totalSize` / `fileSize` accounting | DONE | |

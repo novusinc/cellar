@@ -1,7 +1,9 @@
 import 'dart:async';
 
-import 'package:cellar/src/cellar/storage_scope.dart';
+import 'package:cellar/src/cellar/eviction_policy.dart';
 import 'package:cellar/src/cellar/lifecycle.dart';
+import 'package:cellar/src/cellar/storage_scope.dart';
+import 'package:cellar/src/core/object_info.dart';
 
 /// Callback for eviction failures. [key] is the victim that could not be
 /// deleted, or null when the partition pass itself failed (e.g. the
@@ -111,7 +113,8 @@ class LifecycleRunner {
     final all = await p.scope.list('');
     if (all.isEmpty) return;
 
-    // Sort oldest first.
+    // Oldest written first: the order age eviction walks, and the base order the
+    // policy re-sorts for the size cap.
     final sorted = [...all]
       ..sort((a, b) => a.lastModified.compareTo(b.lastModified));
 
@@ -119,39 +122,74 @@ class LifecycleRunner {
     final maxAge = p.lifecycle.maxAge;
     final maxBytes = p.lifecycle.maxBytes;
 
-    // Pass 1: age-based eviction.
+    // Pass 1: age-based eviction. An object the application keeps (canEvict)
+    // stays, expired or not.
     if (maxAge != null) {
       final cutoff = now.subtract(maxAge);
       for (final info in [...sorted]) {
         if (!info.lastModified.isBefore(cutoff)) continue;
-        try {
-          await p.scope.delete(info.key);
-          sorted.remove(info);
-        } catch (e) {
-          onEvictionError?.call(p.name, info.key, e);
-          // Retries next tick; keep walking the rest.
-        }
+        if (await _evict(p, info, EvictionReason.expired)) sorted.remove(info);
       }
     }
 
-    // Pass 2: size-based eviction, oldest first. A failed victim is
-    // skipped WITHOUT subtracting its size — it still occupies the cap,
-    // so the pass keeps evicting newer objects until under the limit.
+    // Pass 2: size-based eviction in the policy's order. A victim that is kept,
+    // or fails to delete, is skipped WITHOUT subtracting its size — it still
+    // occupies the cap, so the pass keeps evicting the next ones until under the
+    // limit.
     if (maxBytes != null) {
       var total = sorted.fold<int>(0, (a, b) => a + b.size);
-      var i = 0;
-      while (total > maxBytes && i < sorted.length) {
-        final victim = sorted[i];
-        try {
-          await p.scope.delete(victim.key);
+      if (total <= maxBytes) return;
+      final policy = p.lifecycle.evictionPolicy;
+      final ordered = [...sorted]
+        ..sort((a, b) {
+          final byPolicy = policy.compare(a, b);
+          return byPolicy != 0 ? byPolicy : a.key.compareTo(b.key);
+        });
+      for (final victim in ordered) {
+        if (total <= maxBytes) break;
+        if (await _evict(p, victim, EvictionReason.partitionCap)) {
           total -= victim.size;
-          sorted.removeAt(i);
-        } catch (e) {
-          onEvictionError?.call(p.name, victim.key, e);
-          i++; // skip the stuck victim, keep evicting
         }
       }
     }
+  }
+
+  /// Evict [info] from [p], honoring the partition's `canEvict` and
+  /// `evictionGuard`. Returns whether the object was deleted: false when the
+  /// application kept it, the guard skipped it, or the delete failed (reported to
+  /// [onEvictionError] and retried next tick).
+  Future<bool> _evict(
+    _PartitionLifecycle p,
+    ObjectInfo info,
+    EvictionReason reason,
+  ) async {
+    final lifecycle = p.lifecycle;
+    final bool evicted;
+    try {
+      final canEvict = lifecycle.canEvict;
+      if (canEvict != null && !await canEvict(info)) return false;
+      final guard = lifecycle.evictionGuard;
+      if (guard == null) {
+        await p.scope.delete(info.key);
+        evicted = true;
+      } else {
+        final action = _GuardedEviction(p.scope, info.key);
+        await guard(info, action);
+        evicted = action.evicted;
+      }
+    } catch (e) {
+      onEvictionError?.call(p.name, info.key, e);
+      return false;
+    }
+    if (evicted) {
+      try {
+        lifecycle.onEvicted?.call(p.name, info, reason);
+      } catch (e) {
+        // An observer that throws must not stop the pass or undo the eviction.
+        onEvictionError?.call(p.name, info.key, e);
+      }
+    }
+    return evicted;
   }
 
   /// The currently-active timer interval, for diagnostics. Null if no
@@ -164,4 +202,26 @@ class _PartitionLifecycle {
   final String name;
   final StorageScope scope;
   final Lifecycle lifecycle;
+}
+
+/// What an [EvictionGuard] is handed: a way to read the guarded object as it is
+/// now, and the delete. Remembers whether the delete ran, so the runner does not
+/// have to trust a return value.
+class _GuardedEviction implements EvictionAction {
+  _GuardedEviction(this._scope, this._key);
+
+  final StorageScope _scope;
+  final String _key;
+
+  /// Whether [evict] completed.
+  bool evicted = false;
+
+  @override
+  Future<ObjectInfo?> head() => _scope.head(_key);
+
+  @override
+  Future<void> evict() async {
+    await _scope.delete(_key);
+    evicted = true;
+  }
 }

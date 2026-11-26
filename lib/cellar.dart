@@ -62,6 +62,16 @@ library;
 export 'src/cellar/cellar.dart' show Cellar;
 export 'src/cellar/cellar_encryption.dart' show CellarEncryption;
 export 'src/cellar/lifecycle.dart' show Lifecycle;
+export 'src/cellar/eviction_policy.dart'
+    show
+        CanEvict,
+        EvictionAction,
+        EvictionCallback,
+        EvictionGuard,
+        EvictionPolicy,
+        EvictionReason,
+        accessCountMetadataKey,
+        accessedAtMetadataKey;
 export 'src/cellar/lifecycle_runner.dart' show EvictionErrorCallback;
 export 'src/cellar/storage_roots.dart';
 export 'src/cellar/partition_config.dart'

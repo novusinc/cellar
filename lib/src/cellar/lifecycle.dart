@@ -1,3 +1,5 @@
+import 'package:cellar/src/cellar/eviction_policy.dart';
+
 /// Lifecycle policy attached to a partition.
 ///
 /// Governs when stored items get evicted. Cellar runs a single background
@@ -25,6 +27,10 @@ class Lifecycle {
     this.wipeOnOpen = false,
     this.runInterval = const Duration(hours: 1),
     this.osManaged = false,
+    this.evictionPolicy = EvictionPolicy.oldestWritten,
+    this.canEvict,
+    this.evictionGuard,
+    this.onEvicted,
   });
 
   /// Cache-style lifecycle. Bounded by [maxBytes] and/or [maxAge]; OS may
@@ -40,6 +46,10 @@ class Lifecycle {
     this.maxAge,
     this.runInterval = const Duration(hours: 1),
     this.osManaged = true,
+    this.evictionPolicy = EvictionPolicy.oldestWritten,
+    this.canEvict,
+    this.evictionGuard,
+    this.onEvicted,
   }) : wipeOnOpen = false;
 
   /// Scratch-style lifecycle. Wipes the partition every time `Cellar.open`
@@ -48,10 +58,15 @@ class Lifecycle {
     : maxBytes = null,
       maxAge = null,
       wipeOnOpen = true,
-      runInterval = const Duration(hours: 1);
+      runInterval = const Duration(hours: 1),
+      evictionPolicy = EvictionPolicy.oldestWritten,
+      canEvict = null,
+      evictionGuard = null,
+      onEvicted = null;
 
-  /// Total bytes cap. When exceeded, oldest items are evicted until under
-  /// the cap. Null means no size cap.
+  /// Total bytes cap. When exceeded, items are evicted in [evictionPolicy]
+  /// order (oldest written first, unless another is chosen) until under the
+  /// cap. Null means no size cap.
   final int? maxBytes;
 
   /// Items older than this (by `ObjectInfo.lastModified`) are evicted.
@@ -81,6 +96,24 @@ class Lifecycle {
   /// Cellar's lifecycle rules ([maxBytes], [maxAge], [wipeOnOpen]) run on
   /// every backend regardless. OS eviction is a bonus, not a contract.
   final bool osManaged;
+
+  /// The order in which objects are evicted when the partition is over
+  /// [maxBytes]. Default [EvictionPolicy.oldestWritten]. Does not affect [maxAge],
+  /// which removes every expired object regardless of order.
+  final EvictionPolicy evictionPolicy;
+
+  /// Asked before an object is evicted by either rule; return false to keep it
+  /// (an application's own pin). A kept object still counts toward [maxBytes], so
+  /// a partition full of kept objects stays over its cap rather than evicting
+  /// something else in their place. Null means every object may be evicted.
+  final CanEvict? canEvict;
+
+  /// Wraps each eviction so the application can lock and re-check the object
+  /// before it is deleted. See [EvictionGuard]. Null deletes by key straight away.
+  final EvictionGuard? evictionGuard;
+
+  /// Told after each eviction, with why. Null means no observer.
+  final EvictionCallback? onEvicted;
 
   /// True if any rule is configured. Used internally to skip the runner
   /// for partitions with no policy.
