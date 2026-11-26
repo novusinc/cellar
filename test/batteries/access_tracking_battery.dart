@@ -200,6 +200,53 @@ void runAccessTrackingBattery(
       });
     });
 
+    group('a patcher of the caller\'s', () {
+      test('makes the record instead of the default patch, with the keys to '
+          'change', () async {
+        final seen = <(String, Map<String, String?>)>[];
+        final over = AccessTrackingBackend(
+          base,
+          now: () => clock,
+          patcher: (key, changes) async {
+            seen.add((key, changes));
+            await patchMetadata(base, key, changes);
+          },
+        );
+        await over.write('k', bytes(10));
+
+        await over.read('k');
+        await over.idle();
+
+        expect(seen.single.$1, 'k');
+        expect(seen.single.$2.keys.toSet(), {
+          accessedAtMetadataKey,
+          accessCountMetadataKey,
+        });
+        expect((await base.head('k'))!.metadata[accessCountMetadataKey], '1');
+      });
+
+      test('may decline to record, and that is not an error', () async {
+        var asked = 0;
+        final over = AccessTrackingBackend(
+          base,
+          now: () => clock,
+          onError: (key, error) => errors.add((key, error)),
+          patcher: (key, changes) async => asked++, // records nothing
+        );
+        await over.write('k', bytes(10));
+
+        expect(await over.read('k'), bytes(10));
+        await over.idle();
+
+        expect(asked, 1);
+        expect(errors, isEmpty);
+        expect(
+          (await base.head('k'))!.metadata.containsKey(accessCountMetadataKey),
+          isFalse,
+        );
+      });
+    });
+
     group('metadata and objects it forgets', () {
       test('updateMetadata keeps the access record', () async {
         await tracker.write('k', bytes(10));

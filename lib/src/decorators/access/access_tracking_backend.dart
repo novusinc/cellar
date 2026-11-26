@@ -43,6 +43,7 @@ class AccessTrackingBackend extends ForwardingBackend {
     this.minInterval = const Duration(minutes: 1),
     DateTime Function() now = DateTime.now,
     this.onError,
+    this.patcher,
   }) : _now = now;
 
   /// The shortest time between two records of one key.
@@ -50,6 +51,14 @@ class AccessTrackingBackend extends ForwardingBackend {
 
   /// Told when recording an access failed. Null ignores the failure.
   final void Function(String key, Object error)? onError;
+
+  /// How a record is made, when the caller wants to control it: called with the key
+  /// and the keys to change (as `patchMetadata` takes them). By default the record
+  /// is a `patchMetadata` of [inner]. Supply one to take a lock the record must
+  /// respect, or to skip the record when it cannot be taken without waiting; what
+  /// it returns is ignored, so a skipped record is not an error.
+  final Future<void> Function(String key, Map<String, String?> changes)?
+  patcher;
 
   final DateTime Function() _now;
   final Map<String, DateTime> _lastRecorded = {};
@@ -81,10 +90,16 @@ class AccessTrackingBackend extends ForwardingBackend {
       if (info == null) return;
       final count =
           int.tryParse(info.metadata[accessCountMetadataKey] ?? '') ?? 0;
-      await patch.patchMetadata(inner, key, {
+      final changes = {
         accessedAtMetadataKey: '${at.toUtc().microsecondsSinceEpoch}',
         accessCountMetadataKey: '${count + 1}',
-      });
+      };
+      final custom = patcher;
+      if (custom != null) {
+        await custom(key, changes);
+      } else {
+        await patch.patchMetadata(inner, key, changes);
+      }
     } catch (error) {
       // A missing key (deleted since the read) is not worth reporting; anything
       // else is, and neither may reach the reader.
