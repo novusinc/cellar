@@ -281,6 +281,100 @@ void main() {
     );
   });
 
+  group('move', () {
+    test('renames the body itself: no temp copy of it is made', () async {
+      await backend.write(
+        'src',
+        bytes(4000, 1),
+        const WriteOptions(contentType: 'a/b', metadata: {'k': 'v'}),
+      );
+      os.promoted.clear();
+
+      await backend.move('src', 'dir/dst');
+
+      expect(
+        os.promoted.any((p) => p == '${tempDir.path}/src'),
+        isTrue,
+        reason: 'the source file is renamed over the destination',
+      );
+      expect(
+        os.promoted.where((p) => p.contains(FileSystemBackend.writeTempSuffix)),
+        hasLength(1),
+        reason: 'only the sidecar goes through a temp, not the body',
+      );
+      expect(await backend.read('dir/dst'), bytes(4000, 1));
+      expect((await backend.head('dir/dst'))!.contentType, 'a/b');
+      expect(File('${tempDir.path}/src').existsSync(), isFalse);
+      expect(File('${tempDir.path}/src.meta.json').existsSync(), isFalse);
+    });
+
+    test('keeps lastModified', () async {
+      await backend.write('src', bytes(10, 1));
+      final before = (await backend.head('src'))!.lastModified;
+
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      await backend.move('src', 'dst');
+
+      expect((await backend.head('dst'))!.lastModified, before);
+    });
+
+    test('a crash before the body moves leaves the source whole and the '
+        'destination as it was', () async {
+      await backend.write(
+        'src',
+        bytes(100, 1),
+        const WriteOptions(contentType: 'a/b', metadata: {'k': 'v'}),
+      );
+      await backend.write(
+        'dst',
+        bytes(50, 2),
+        const WriteOptions(contentType: 'old/x', metadata: {'old': '1'}),
+      );
+
+      os.crashOnRename = 1; // the body's rename
+      await expectLater(backend.move('src', 'dst'), throwsA(isA<_Crash>()));
+
+      final next = reopened();
+      expect(await next.read('src'), bytes(100, 1));
+      expect((await next.head('src'))!.metadata, {'k': 'v'});
+      expect(await next.read('dst'), bytes(50, 2));
+      expect((await next.head('dst'))!.contentType, 'old/x');
+    });
+
+    test(
+      'a crash between the body and its sidecar is completed at open',
+      () async {
+        await backend.write(
+          'src',
+          bytes(100, 1),
+          const WriteOptions(contentType: 'a/b', metadata: {'k': 'v'}),
+        );
+        await backend.write(
+          'dst',
+          bytes(50, 2),
+          const WriteOptions(contentType: 'old/x', metadata: {'old': '1'}),
+        );
+
+        os.crashOnRename = 2; // the sidecar's rename, after the body moved
+        await expectLater(backend.move('src', 'dst'), throwsA(isA<_Crash>()));
+
+        final next = reopened();
+        // The new body is not shown with the destination's OLD metadata.
+        final mid = (await next.head('dst'))!;
+        expect(mid.size, 100);
+        expect(mid.contentType, isNull);
+        expect(mid.metadata, isEmpty);
+
+        await next.recoverInterruptedWrites();
+
+        final done = (await next.head('dst'))!;
+        expect(done.contentType, 'a/b');
+        expect(done.metadata, {'k': 'v'});
+        expect(await next.read('dst'), bytes(100, 1));
+      },
+    );
+  });
+
   group('recovery at open', () {
     test('completes a write interrupted between the two promotes', () async {
       await backend.write(
@@ -401,6 +495,9 @@ class _Crash implements Exception {
 class _CrashingOs extends DefaultFileSystemOs {
   int? _renamesLeft;
 
+  /// The source path of every rename that went ahead.
+  final List<String> promoted = [];
+
   /// Dies at the [n]th `renameOver` from now (1 is the next one); null clears it.
   set crashOnRename(int? n) => _renamesLeft = n;
 
@@ -421,6 +518,7 @@ class _CrashingOs extends DefaultFileSystemOs {
         throw _Crash();
       }
     }
+    promoted.add(from.path);
     await super.renameOver(from, toPath);
   }
 

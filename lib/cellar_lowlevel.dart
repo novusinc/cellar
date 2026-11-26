@@ -38,6 +38,7 @@ library;
 export 'src/core/storage_backend.dart' show StorageBackend;
 export 'src/core/object_info.dart' show ObjectInfo;
 export 'src/core/materialized_file.dart' show MaterializedFile;
+export 'src/core/movable_backend.dart' show MovableBackend, moveObject;
 export 'src/core/metadata_patchable.dart'
     show MetadataPatchableBackend, applyMetadataChanges, patchMetadata;
 export 'src/core/dispose_guard.dart' show DisposeGuard;

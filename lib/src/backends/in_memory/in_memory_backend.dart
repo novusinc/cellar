@@ -4,6 +4,7 @@ import 'package:cellar/src/core/dispose_guard.dart';
 import 'package:cellar/src/core/errors.dart';
 import 'package:cellar/src/core/materialized_file.dart';
 import 'package:cellar/src/core/metadata_patchable.dart';
+import 'package:cellar/src/core/movable_backend.dart';
 import 'package:cellar/src/core/object_info.dart';
 import 'package:cellar/src/core/storage_backend.dart';
 import 'package:cellar/src/core/write_options.dart';
@@ -20,7 +21,9 @@ import 'package:cellar/src/core/write_options.dart';
 /// files. [materialize] throws [UnsupportedError]: there is no filesystem to
 /// hand a path from, so wrap this in a backend that provides a real handle, or
 /// use `FileSystemBackend` in a test that exercises `materialize`.
-class InMemoryBackend with DisposeGuard implements MetadataPatchableBackend {
+class InMemoryBackend
+    with DisposeGuard
+    implements MetadataPatchableBackend, MovableBackend {
   final Map<String, Uint8List> _data = {};
   final Map<String, Map<String, String>> _metadata = {};
   final Map<String, String?> _contentType = {};
@@ -168,6 +171,19 @@ class InMemoryBackend with DisposeGuard implements MetadataPatchableBackend {
     // lastModified is when the bytes were written: a metadata change keeps it.
     _contentType[key] = contentType;
     _metadata[key] = Map.of(metadata);
+  }
+
+  @override
+  Future<void> move(String sourceKey, String destKey) async {
+    checkNotDisposed();
+    final bytes = _data[sourceKey];
+    if (bytes == null) throw FileNotFoundError(sourceKey);
+    if (sourceKey == destKey) return;
+    _data[destKey] = bytes;
+    _contentType[destKey] = _contentType.remove(sourceKey);
+    _metadata[destKey] = _metadata.remove(sourceKey) ?? const {};
+    _lastModified[destKey] = _lastModified.remove(sourceKey)!;
+    _data.remove(sourceKey);
   }
 
   @override

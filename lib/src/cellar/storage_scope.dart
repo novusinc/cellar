@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import 'package:cellar/src/core/movable_backend.dart';
 import 'package:cellar/src/core/storage_backend.dart';
 import 'package:cellar/src/core/key_validation.dart';
 import 'package:cellar/src/core/materialized_file.dart';
@@ -216,8 +217,8 @@ class StorageScope {
   Future<void> move(String sourcePath, String destPath) async {
     validateKey(sourcePath);
     validateKey(destPath);
-    await _backend.copy(key(sourcePath), key(destPath));
-    await _backend.delete(key(sourcePath));
+    // By rename in one step where the backend can, otherwise copy then delete.
+    await moveObject(_backend, key(sourcePath), key(destPath));
   }
 
   /// Copy into another scope — the backends must share a

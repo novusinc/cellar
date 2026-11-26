@@ -205,6 +205,83 @@ void runStorageBackendConformance(
       });
     });
 
+    // ── move — moveObject, by rename where the backend can ───────────────
+    group('moveObject', () {
+      test('the object is at the destination, with its bytes, content type '
+          'and metadata, and gone from the source', () async {
+        await backend.write(
+          'from',
+          bytes('moved body'),
+          const WriteOptions(contentType: 'a/b', metadata: {'k': 'v'}),
+        );
+        final before = (await backend.head('from'))!;
+
+        await moveObject(backend, 'from', 'to/deep');
+
+        expect(await backend.exists('from'), isFalse);
+        expect(await backend.read('to/deep'), bytes('moved body'));
+        final info = (await backend.head('to/deep'))!;
+        expect(info.contentType, 'a/b');
+        expect(info.metadata['k'], 'v');
+        expect(info.size, before.size);
+        expect((await backend.list('')).map((i) => i.key), ['to/deep']);
+      });
+
+      test('replaces an object at the destination, metadata and all', () async {
+        await backend.write(
+          'dst',
+          bytes('old'),
+          const WriteOptions(contentType: 'old/x', metadata: {'old': '1'}),
+        );
+        await backend.write('src', bytes('new body'));
+
+        await moveObject(backend, 'src', 'dst');
+
+        expect(await backend.read('dst'), bytes('new body'));
+        final info = (await backend.head('dst'))!;
+        expect(info.contentType, isNull);
+        expect(info.metadata.containsKey('old'), isFalse);
+        expect(await backend.exists('src'), isFalse);
+      });
+
+      test(
+        'a missing source throws FileNotFoundError and changes nothing',
+        () async {
+          await backend.write('dst', bytes('keep'));
+
+          await expectLater(
+            moveObject(backend, 'nope', 'dst'),
+            throwsA(isA<FileNotFoundError>()),
+          );
+
+          expect(await backend.read('dst'), bytes('keep'));
+        },
+      );
+
+      test('moving a key onto itself leaves it as it is', () async {
+        await backend.write(
+          'same',
+          bytes('x'),
+          const WriteOptions(metadata: {'k': 'v'}),
+        );
+
+        await moveObject(backend, 'same', 'same');
+
+        expect(await backend.read('same'), bytes('x'));
+        expect((await backend.head('same'))!.metadata['k'], 'v');
+      });
+
+      test('a large object moves whole', () async {
+        final big = sized(300 * 1024);
+        await backend.write('big', big);
+
+        await moveObject(backend, 'big', 'moved/big');
+
+        expect(await backend.read('moved/big'), big);
+        expect(await backend.exists('big'), isFalse);
+      });
+    });
+
     // ── patchMetadata — change some keys, keep everything else ───────────
     group('patchMetadata', () {
       test(

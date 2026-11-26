@@ -10,6 +10,7 @@ import 'package:cellar/src/core/dispose_guard.dart';
 import 'package:cellar/src/core/errors.dart';
 import 'package:cellar/src/core/materialized_file.dart';
 import 'package:cellar/src/core/metadata_patchable.dart';
+import 'package:cellar/src/core/movable_backend.dart';
 import 'package:cellar/src/core/object_info.dart';
 import 'package:cellar/src/core/write_options.dart';
 
@@ -42,7 +43,9 @@ import 'package:cellar/src/core/write_options.dart';
 /// on macOS (the supported Time Machine mechanism). On Android / Linux /
 /// Windows the flag is a no-op. Applied lazily on the first write —
 /// there's no async setup step in the constructor.
-class FileSystemBackend with DisposeGuard implements MetadataPatchableBackend {
+class FileSystemBackend
+    with DisposeGuard
+    implements MetadataPatchableBackend, MovableBackend {
   /// Create a backend rooted at `baseDir`.
   ///
   /// [osBackup] (default `true`) controls whether the directory
@@ -490,6 +493,63 @@ class FileSystemBackend with DisposeGuard implements MetadataPatchableBackend {
           : null,
       metadata: _castMetadata(source?['metadata']),
     );
+  }
+
+  // ── Move ──
+
+  /// Move by renaming the body, so its bytes are not copied or in two places.
+  ///
+  /// The sidecar follows with the protocol of a write: the destination's sidecar is
+  /// first written as a temp that records the body's identity (a rename keeps the
+  /// size and modification time, so the identity is the same at the new key), then
+  /// the body is renamed over the destination, then the sidecar. A crash between
+  /// the two renames leaves the new body beside the destination's old sidecar,
+  /// which does not match it and reads as absent, and the sidecar temp, which
+  /// [recoverInterruptedWrites] completes at the next open. The source's sidecar is
+  /// removed last; one left behind belongs to no body and is ignored.
+  @override
+  Future<void> move(String sourceKey, String destKey) async {
+    checkNotDisposed();
+    final source = _file(sourceKey);
+    final stat = await source.stat();
+    if (stat.type == FileSystemEntityType.notFound) {
+      throw FileNotFoundError(sourceKey);
+    }
+    if (sourceKey == destKey) return;
+    final dest = _file(destKey);
+    await dest.parent.create(recursive: true);
+
+    final meta = await _readMeta(sourceKey, stat);
+    final contentType = meta?['contentType'];
+    final metadata = _castMetadata(meta?['metadata']);
+    File? tempMeta;
+    if (_hasMetadata(contentType is String ? contentType : null, metadata)) {
+      tempMeta = File(_writeTempPath(_metaFile(destKey).path));
+      try {
+        await _writeSidecar(
+          tempMeta,
+          contentType is String ? contentType : null,
+          metadata,
+          stat,
+        );
+      } catch (_) {
+        await _discardTemp(tempMeta);
+        rethrow;
+      }
+    }
+    try {
+      await _os.renameOver(source, dest.path);
+    } catch (_) {
+      // Nothing moved: the source is intact, and so is the destination.
+      if (tempMeta != null) await _discardTemp(tempMeta);
+      rethrow;
+    }
+    if (tempMeta != null) {
+      await _os.renameOver(tempMeta, _metaFile(destKey).path);
+    } else {
+      await _os.deleteFile(_metaFile(destKey));
+    }
+    await _os.deleteFile(_metaFile(sourceKey));
   }
 
   // ── Metadata update ──
