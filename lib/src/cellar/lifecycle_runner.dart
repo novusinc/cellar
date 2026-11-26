@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:cellar/src/cellar/byte_budget.dart';
 import 'package:cellar/src/cellar/eviction_policy.dart';
 import 'package:cellar/src/cellar/lifecycle.dart';
 import 'package:cellar/src/cellar/storage_scope.dart';
@@ -32,6 +33,7 @@ class LifecycleRunner {
   }) : _now = now;
 
   final Map<String, _PartitionLifecycle> _partitions = {};
+  final Map<String, ByteBudget> _budgets = {};
 
   /// Injectable clock — age eviction is testable at exact boundaries
   /// without real waits.
@@ -51,11 +53,19 @@ class LifecycleRunner {
     _restartTimer();
   }
 
+  /// Register a budget over partitions already registered (a member with no rules
+  /// of its own is registered with an empty [Lifecycle]). Called by `Cellar`.
+  void registerBudget(String name, ByteBudget budget) {
+    _budgets[name] = budget;
+    _restartTimer();
+  }
+
   /// Stop the timer and clear state. Called by `Cellar.close`.
   void dispose() {
     _timer?.cancel();
     _timer = null;
     _partitions.clear();
+    _budgets.clear();
   }
 
   /// Run evaluation immediately for every registered partition. Useful
@@ -64,6 +74,32 @@ class LifecycleRunner {
     for (final p in _partitions.values) {
       await _evaluate(p);
     }
+    for (final entry in _budgets.entries) {
+      await _enforceBudget(entry.value);
+    }
+  }
+
+  /// Free at least [bytes] from the budget [name], evicting in its policy order
+  /// across its partitions; returns the bytes freed, which is less than [bytes]
+  /// when what is left is kept (`canEvict`, a guard) or the budget is smaller.
+  ///
+  /// This is not "get under the cap": it frees [bytes] whether or not the budget is
+  /// full, for a caller whose write failed because the device or browser ran out of
+  /// room that the budget does not know about.
+  Future<int> makeRoom(String name, int bytes) async {
+    final budget = _budgets[name];
+    if (budget == null) {
+      throw ArgumentError.value(name, 'budget', 'unknown budget');
+    }
+    if (bytes <= 0) return 0;
+    var freed = 0;
+    for (final victim in await _budgetVictims(budget)) {
+      if (freed >= bytes) break;
+      if (await _evict(victim.$1, victim.$2, EvictionReason.makeRoom)) {
+        freed += victim.$2.size;
+      }
+    }
+    return freed;
   }
 
   /// Run wipeOnOpen across all partitions whose lifecycle requests it.
@@ -86,6 +122,11 @@ class LifecycleRunner {
       final candidate = p.lifecycle.runInterval;
       if (shortest == null || candidate < shortest) shortest = candidate;
     }
+    for (final budget in _budgets.values) {
+      if (shortest == null || budget.runInterval < shortest) {
+        shortest = budget.runInterval;
+      }
+    }
     if (shortest == null) return;
 
     _interval = shortest;
@@ -100,6 +141,48 @@ class LifecycleRunner {
         // The pass itself failed (listing errored, backend down). Report
         // and move to the next partition; this one retries next tick.
         onEvictionError?.call(p.name, null, e);
+      }
+    }
+    for (final entry in _budgets.entries) {
+      try {
+        await _enforceBudget(entry.value);
+      } catch (e) {
+        onEvictionError?.call(entry.key, null, e);
+      }
+    }
+  }
+
+  /// Every object of the budget's partitions, in the budget's eviction order, each
+  /// with the partition it lives in. Ties break by partition then key.
+  Future<List<(_PartitionLifecycle, ObjectInfo)>> _budgetVictims(
+    ByteBudget budget,
+  ) async {
+    final all = <(_PartitionLifecycle, ObjectInfo)>[];
+    for (final name in budget.partitions) {
+      final p = _partitions[name]!;
+      for (final info in await p.scope.list('')) {
+        all.add((p, info));
+      }
+    }
+    all.sort((a, b) {
+      final byPolicy = budget.evictionPolicy.compare(a.$2, b.$2);
+      if (byPolicy != 0) return byPolicy;
+      final byPartition = a.$1.name.compareTo(b.$1.name);
+      return byPartition != 0 ? byPartition : a.$2.key.compareTo(b.$2.key);
+    });
+    return all;
+  }
+
+  /// Bring the budget's partitions, together, under its cap. Runs after each
+  /// partition's own rules, so those have already trimmed what they could.
+  Future<void> _enforceBudget(ByteBudget budget) async {
+    final victims = await _budgetVictims(budget);
+    var total = victims.fold<int>(0, (a, v) => a + v.$2.size);
+    if (total <= budget.maxBytes) return;
+    for (final victim in victims) {
+      if (total <= budget.maxBytes) break;
+      if (await _evict(victim.$1, victim.$2, EvictionReason.budget)) {
+        total -= victim.$2.size;
       }
     }
   }

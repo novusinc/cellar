@@ -11,6 +11,7 @@ import 'package:cellar/src/cellar/cellar_encryption.dart';
 import 'package:cellar/src/cellar/storage_roots.dart';
 import 'package:cellar/src/cellar/storage_scope.dart';
 import 'package:cellar/src/cellar/lifecycle.dart';
+import 'package:cellar/src/cellar/byte_budget.dart';
 import 'package:cellar/src/cellar/lifecycle_runner.dart';
 import 'package:cellar/src/cellar/partition_config.dart';
 
@@ -95,13 +96,17 @@ class Cellar {
     CellarEncryption? encryption,
     this.onEvictionError,
     StorageRoots? roots,
+    Map<String, ByteBudget>? budgets,
   }) : _partitions = _resolvePartitions(partitions, defaultPartition),
        _defaultPartition = defaultPartition,
        _encryption = encryption,
        _origin = _Origin.platform,
        _providedBackends = null,
        _roots = roots,
-       _atPath = null;
+       _atPath = null,
+       _budgets = Map.unmodifiable(budgets ?? const {}) {
+    _validateBudgets();
+  }
 
   /// Open at a dev-supplied native filesystem path.
   ///
@@ -122,13 +127,17 @@ class Cellar {
     this.keyPrefix,
     CellarEncryption? encryption,
     this.onEvictionError,
+    Map<String, ByteBudget>? budgets,
   }) : _partitions = _resolvePartitions(partitions, defaultPartition),
        _defaultPartition = defaultPartition,
        _encryption = encryption,
        _origin = _Origin.atPath,
        _providedBackends = null,
        _roots = null,
-       _atPath = path;
+       _atPath = path,
+       _budgets = Map.unmodifiable(budgets ?? const {}) {
+    _validateBudgets();
+  }
 
   /// Open over a map of pre-built backends.
   ///
@@ -145,6 +154,7 @@ class Cellar {
     CellarEncryption? encryption,
     Map<String, Lifecycle>? lifecycles,
     this.onEvictionError,
+    Map<String, ByteBudget>? budgets,
   }) : name = null,
        _partitions = _partitionConfigsFor(backends, lifecycles),
        _defaultPartition = defaultPartition,
@@ -152,7 +162,10 @@ class Cellar {
        _origin = _Origin.withBackends,
        _providedBackends = _validateBackends(backends, defaultPartition),
        _roots = null,
-       _atPath = null;
+       _atPath = null,
+       _budgets = Map.unmodifiable(budgets ?? const {}) {
+    _validateBudgets();
+  }
   // ══════════════════════════════════════════════════════════════════════
   // CONSTRUCTION (sync)
   // ══════════════════════════════════════════════════════════════════════
@@ -174,6 +187,9 @@ class Cellar {
 
   /// Encryption config, or null for plaintext.
   final CellarEncryption? _encryption;
+
+  /// Byte budgets shared across partitions, by name. See [ByteBudget].
+  final Map<String, ByteBudget> _budgets;
 
   /// Observer for lifecycle-eviction failures. Null = silent (failed
   /// victims still retry on the next tick). See [EvictionErrorCallback].
@@ -276,6 +292,17 @@ class Cellar {
       if (cfg.lifecycle != null) {
         runner.register(partitionName, scopes[partitionName]!, cfg.lifecycle!);
       }
+    }
+
+    // A budget's members join the runner even with no rules of their own, so the
+    // budget can list and evict them.
+    for (final entry in _budgets.entries) {
+      for (final member in entry.value.partitions) {
+        if (_partitions[member]!.lifecycle == null) {
+          runner.register(member, scopes[member]!, const Lifecycle());
+        }
+      }
+      runner.registerBudget(entry.key, entry.value);
     }
 
     // Scratch partitions wipe before we hand out the cellar.
@@ -557,6 +584,42 @@ class Cellar {
   Future<int> fileSize(String key, {String? partition}) =>
       _scopeFor(partition).fileSize(key);
 
+  /// Evict at least [bytes] now, in the order of [budget]'s policy across its
+  /// partitions, and return how many bytes that freed.
+  ///
+  /// For a write that failed because the device or the browser ran out of room:
+  /// free what the write needs, then try it again. It does not wait for the
+  /// timer, and it frees [bytes] whether or not the budget itself is full, since
+  /// the shortage may be one the budget cannot see. An object a partition's
+  /// `canEvict` or `evictionGuard` keeps is not touched, so the result can be less
+  /// than [bytes]; it is 0 when nothing could be evicted.
+  ///
+  /// [budget] names the budget; it may be omitted when there is exactly one.
+  /// Throws [StateError] when the cellar has no budget, and [ArgumentError] when
+  /// [budget] is unknown or omitted among several.
+  Future<int> makeRoom(int bytes, {String? budget}) async {
+    _assertOpen();
+    if (_budgets.isEmpty) {
+      throw StateError('makeRoom needs a ByteBudget, and this Cellar has none');
+    }
+    final name = budget ?? (_budgets.length == 1 ? _budgets.keys.single : null);
+    if (name == null) {
+      throw ArgumentError.value(
+        budget,
+        'budget',
+        'name one of: ${_budgets.keys.join(", ")}',
+      );
+    }
+    if (!_budgets.containsKey(name)) {
+      throw ArgumentError.value(
+        budget,
+        'budget',
+        'unknown budget; configured: ${_budgets.keys.join(", ")}',
+      );
+    }
+    return _lifecycleRunner!.makeRoom(name, bytes);
+  }
+
   // ══════════════════════════════════════════════════════════════════════
   // TEST HOOKS
   // ══════════════════════════════════════════════════════════════════════
@@ -584,6 +647,47 @@ class Cellar {
       );
     }
     return scope;
+  }
+
+  /// Reject a budget that cannot work, at construction: no members, an unknown
+  /// member, a member shared with another budget, or a cap that is not positive.
+  void _validateBudgets() {
+    final owner = <String, String>{};
+    for (final entry in _budgets.entries) {
+      final budget = entry.value;
+      if (budget.maxBytes <= 0) {
+        throw ArgumentError.value(
+          budget.maxBytes,
+          'budgets[${entry.key}].maxBytes',
+          'must be positive',
+        );
+      }
+      if (budget.partitions.isEmpty) {
+        throw ArgumentError.value(
+          entry.key,
+          'budgets',
+          'a budget needs at least one partition',
+        );
+      }
+      for (final member in budget.partitions) {
+        if (!_partitions.containsKey(member)) {
+          throw ArgumentError.value(
+            member,
+            'budgets[${entry.key}].partitions',
+            'unknown partition; configured: ${_partitions.keys.join(", ")}',
+          );
+        }
+        final other = owner[member];
+        if (other != null) {
+          throw ArgumentError.value(
+            member,
+            'budgets[${entry.key}].partitions',
+            'is already in the budget "$other"; a partition is in at most one',
+          );
+        }
+        owner[member] = entry.key;
+      }
+    }
   }
 
   StorageBackend _requirePartition(String partition) {
