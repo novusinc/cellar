@@ -39,7 +39,7 @@ maintenance recipes see [`UPDATING.md`](UPDATING.md).
 
 | Capability | Status | Notes |
 |---|---|---|
-| Atomic writes (temp + rename) | DONE | Crash mid-write leaves the previous object |
+| Atomic writes (temp + rename) | DONE | Crash mid-write leaves the previous object. `write`, `writeStream` and `copy` all write a complete, flushed temp beside the key and rename it over; pinned by crash-injection tests through the `FileSystemOs` seam |
 | Sidecar metadata (`.meta.json`) with silent rebuild | DONE | Body is truth; unparseable sidecar deleted + rebuilt on next write |
 | Windows tombstoned deletes + `sweepTombstones` | DONE | Real-OS leg in the CI matrix; `delete()` succeeds immediately on every OS |
 | Backup exclusion (iOS `kCFURLIsExcludedFromBackupKey` via CFURL FFI · macOS tmutil) | DONE | Via the `FileSystemOs` seam; survives `wipePartition` (the wipe deletes children, never the attributed root); failures degrade to backed-up, never fail a write |

@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:cellar/src/backends/file_system/os/file_system_os.dart';
@@ -104,9 +105,53 @@ class FileSystemBackend with DisposeGuard implements StorageBackend {
     await _os.sweepTombstones(_baseDir);
   }
 
+  static final Random _random = Random.secure();
+
+  /// A fresh temp path beside [filePath]. The suffix is random, not a timestamp:
+  /// two writes in the same microsecond, or in two isolates, must never share a
+  /// temp file.
   String _writeTempPath(String filePath) {
-    final stamp = DateTime.now().microsecondsSinceEpoch.toRadixString(16);
-    return '$filePath$writeTempSuffix$stamp';
+    final unique = [
+      for (var i = 0; i < 4; i++)
+        _random.nextInt(0x100000000).toRadixString(16),
+    ].join();
+    return '$filePath$writeTempSuffix$unique';
+  }
+
+  /// Write an object atomically: [fill] writes the complete data into a temp file
+  /// beside [dest] and flushes it, and only then is the temp renamed over [dest].
+  ///
+  /// A rename replaces the destination in one step, so a reader, or a crash,
+  /// sees the previous object or the whole new one and nothing in between. If
+  /// [fill] or the rename fails the temp is removed and the destination is left
+  /// as it was; after a crash the temp stays behind, inert (listings skip it).
+  Future<void> _writeAtomically(
+    File dest,
+    Future<void> Function(File temp) fill,
+  ) async {
+    final temp = File(_writeTempPath(dest.path));
+    try {
+      await fill(temp);
+      await _os.renameOver(temp, dest.path);
+    } catch (_) {
+      try {
+        await _os.deleteFile(temp);
+      } on FileSystemException {
+        // The first failure is the one to report; an undeletable temp is inert.
+      }
+      rethrow;
+    }
+  }
+
+  /// Flush [file]'s contents to disk (an `fsync`), so a rename that promotes it
+  /// cannot outlive the data on a file system that reorders the two.
+  Future<void> _flushToDisk(File file) async {
+    final handle = await file.open(mode: FileMode.append);
+    try {
+      await handle.flush();
+    } finally {
+      await handle.close();
+    }
   }
 
   // ── Write ──
@@ -126,27 +171,26 @@ class FileSystemBackend with DisposeGuard implements StorageBackend {
     // after the source completes. A stream that errors (or a crash) must
     // never leave a readable partial object at the key — a torn cache
     // fill or interrupted upload would otherwise be served as complete.
-    final temp = File(_writeTempPath(file.path));
-    final sink = temp.openWrite();
-    var bytesWritten = 0;
-    try {
-      await for (final chunk in byteStream) {
-        sink.add(chunk);
-        bytesWritten += chunk.length;
-        options.onProgress?.call(bytesWritten, null);
-      }
-      await sink.close();
-    } catch (e) {
+    await _writeAtomically(file, (temp) async {
+      final sink = temp.openWrite();
+      var bytesWritten = 0;
       try {
+        await for (final chunk in byteStream) {
+          sink.add(chunk);
+          bytesWritten += chunk.length;
+          options.onProgress?.call(bytesWritten, null);
+        }
         await sink.close();
-      } on FileSystemException {
-        // The sink may already be broken; the temp delete below is what
-        // matters.
+      } catch (_) {
+        try {
+          await sink.close();
+        } on FileSystemException {
+          // The sink may already be broken; the temp delete is what matters.
+        }
+        rethrow;
       }
-      await _os.deleteFile(temp);
-      rethrow;
-    }
-    await _os.renameOver(temp, file.path);
+      await _flushToDisk(temp);
+    });
     await _writeMeta(key, options.contentType, options.metadata);
   }
 
@@ -160,7 +204,10 @@ class FileSystemBackend with DisposeGuard implements StorageBackend {
     await _ensureBackupAttribute();
     final file = _file(key);
     await file.parent.create(recursive: true);
-    await file.writeAsBytes(bytes, flush: true);
+    await _writeAtomically(
+      file,
+      (temp) => temp.writeAsBytes(bytes, flush: true),
+    );
     await _writeMeta(key, options.contentType, options.metadata);
   }
 
@@ -334,7 +381,13 @@ class FileSystemBackend with DisposeGuard implements StorageBackend {
     checkNotDisposed();
     final dest = _file(destKey);
     await dest.parent.create(recursive: true);
-    await _file(sourceKey).copy(dest.path);
+    // dart:io removes an existing destination before copying onto it, so a
+    // copy straight to the key could leave it truncated or gone. Copy beside it
+    // and promote by rename, as every other write does.
+    await _writeAtomically(dest, (temp) async {
+      await _file(sourceKey).copy(temp.path);
+      await _flushToDisk(temp);
+    });
     final srcMeta = _metaFile(sourceKey);
     if (await srcMeta.exists()) {
       await srcMeta.copy(_metaFile(destKey).path);
