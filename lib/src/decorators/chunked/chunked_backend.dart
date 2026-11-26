@@ -6,6 +6,7 @@ import 'package:cellar/src/core/materialized_file.dart';
 import 'package:cellar/src/core/object_info.dart';
 import 'package:cellar/src/core/write_options.dart';
 import 'package:cellar/src/core/errors.dart';
+import 'package:cellar/src/core/metadata_keys.dart';
 
 /// A backing that can list just the records whose key ends with a suffix, without
 /// touching the others.
@@ -107,12 +108,6 @@ class ChunkedBackend with DisposeGuard implements StorageBackend {
 
   /// Per-chunk record marker. The chunk index follows it.
   static const String chunkPrefix = '__c';
-
-  /// Manifest-metadata keys this layer maintains. Constants because the
-  /// writer and the decoder must never drift.
-  static const String _metaGeneration = 'generation';
-  static const String _metaChunkCount = 'chunkCount';
-  static const String _metaTotalSize = 'totalSize';
 
   final StorageBackend _backing;
 
@@ -495,12 +490,12 @@ class ChunkedBackend with DisposeGuard implements StorageBackend {
     await _backing.updateMetadata(
       _manifestKey(key),
       contentType: contentType,
-      metadata: {
-        _metaGeneration: '${manifest.generation}',
-        _metaChunkCount: '${manifest.chunkCount}',
-        _metaTotalSize: '${manifest.totalSize}',
-        ...metadata,
-      },
+      metadata: _manifestMetadata(
+        manifest.generation,
+        manifest.chunkCount,
+        manifest.totalSize,
+        metadata,
+      ),
     );
   }
 
@@ -561,12 +556,12 @@ class ChunkedBackend with DisposeGuard implements StorageBackend {
       Uint8List(0),
       WriteOptions(
         contentType: contentType,
-        metadata: {
-          _metaGeneration: '$generation',
-          _metaChunkCount: '$chunkCount',
-          _metaTotalSize: '$totalSize',
-          ...metadata,
-        },
+        metadata: _manifestMetadata(
+          generation,
+          chunkCount,
+          totalSize,
+          metadata,
+        ),
       ),
     );
   }
@@ -577,21 +572,51 @@ class ChunkedBackend with DisposeGuard implements StorageBackend {
     return _decodeManifest(info);
   }
 
+  /// The manifest record's metadata: this layer's three keys under their
+  /// `cellar.` names, then the caller's, stored exactly as given. The caller's
+  /// keys cannot collide with ours, whatever they are called.
+  Map<String, String> _manifestMetadata(
+    int generation,
+    int chunkCount,
+    int totalSize,
+    Map<String, String> user,
+  ) => {
+    ...user,
+    CellarMetadata.generation.name: '$generation',
+    CellarMetadata.chunkCount.name: '$chunkCount',
+    CellarMetadata.totalSize.name: '$totalSize',
+  };
+
   ChunkedManifest _decodeManifest(ObjectInfo info) {
     final raw = info.metadata;
-    final generation = int.tryParse(raw[_metaGeneration] ?? '') ?? 0;
-    final chunkCount = int.tryParse(raw[_metaChunkCount] ?? '') ?? 0;
-    final totalSize = int.tryParse(raw[_metaTotalSize] ?? '') ?? 0;
-    final userMeta = Map<String, String>.from(raw)
-      ..remove(_metaGeneration)
-      ..remove(_metaChunkCount)
-      ..remove(_metaTotalSize);
+    int number(CellarMetadataKey key) =>
+        int.tryParse(
+          CellarMetadata.read(raw, key, marker: CellarMetadata.generation) ??
+              '',
+        ) ??
+        0;
+    // An object written by the current format has `cellar.generation`; one
+    // written by cellar 1.0.0 has the unprefixed names, which are then cellar's
+    // and hidden from the caller. In a current object an unprefixed
+    // `generation` or `totalSize` is the caller's own and is returned as it is.
+    final current = raw.containsKey(CellarMetadata.generation.name);
+    final ours = {
+      for (final key in [
+        CellarMetadata.generation,
+        CellarMetadata.chunkCount,
+        CellarMetadata.totalSize,
+      ])
+        current ? key.name : key.legacyName,
+    };
     return ChunkedManifest(
-      generation: generation,
-      chunkCount: chunkCount,
-      totalSize: totalSize,
+      generation: number(CellarMetadata.generation),
+      chunkCount: number(CellarMetadata.chunkCount),
+      totalSize: number(CellarMetadata.totalSize),
       contentType: info.contentType,
-      metadata: userMeta,
+      metadata: {
+        for (final entry in raw.entries)
+          if (!ours.contains(entry.key)) entry.key: entry.value,
+      },
       lastModified: info.lastModified,
     );
   }

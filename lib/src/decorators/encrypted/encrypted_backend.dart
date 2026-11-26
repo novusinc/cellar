@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:cellar/src/decorators/encrypted/file_encryptor.dart';
 import 'package:cellar/src/decorators/encrypted/encryption_key_resolver.dart';
 import 'package:cellar/src/core/errors.dart';
+import 'package:cellar/src/core/metadata_keys.dart';
 import 'package:cellar/src/core/storage_backend.dart';
 import 'package:cellar/src/core/dispose_guard.dart';
 import 'package:cellar/src/core/materialized_file.dart';
@@ -76,11 +77,41 @@ class EncryptedBackend with DisposeGuard implements StorageBackend {
   /// reusable decrypt-cache entries.
   static const String _cacheEntryMarker = '.dec.';
 
-  /// Sidecar-metadata keys this decorator maintains. Constants because a
-  /// typo in one of the ten-plus sites would silently break encryption
-  /// detection or size reporting.
-  static const String _metaEncrypted = 'encrypted';
-  static const String _metaOriginalSize = 'originalSize';
+  /// Whether the stored object is ciphertext, by this layer's own metadata key.
+  /// An object written by cellar 1.0.0 has it unprefixed (`encrypted`); one
+  /// written now has `cellar.encrypted`, `'false'` for plaintext too, so a caller's
+  /// own `encrypted` key can never be mistaken for it.
+  static bool _isEncrypted(ObjectInfo info) =>
+      CellarMetadata.read(
+        info.metadata,
+        CellarMetadata.encrypted,
+        marker: CellarMetadata.encrypted,
+      ) ==
+      'true';
+
+  /// The plaintext size this layer recorded, if it did.
+  static int? _recordedSize(ObjectInfo info) => int.tryParse(
+    CellarMetadata.read(
+          info.metadata,
+          CellarMetadata.originalSize,
+          marker: CellarMetadata.encrypted,
+        ) ??
+        '',
+  );
+
+  /// [user]'s metadata with this layer's keys: always `cellar.encrypted`, and
+  /// `cellar.originalSize` when the size is known. They go last, so whatever a
+  /// caller (or a copy that carried an object's `head` back in) put under those
+  /// names is replaced by what is true of this write.
+  static Map<String, String> _withEncryption(
+    Map<String, String> user, {
+    required bool encrypted,
+    int? originalSize,
+  }) => {
+    ...user,
+    CellarMetadata.encrypted.name: '$encrypted',
+    if (originalSize != null) CellarMetadata.originalSize.name: '$originalSize',
+  };
 
   /// Monotonic disambiguator so concurrent fresh decrypts of the same key
   /// in the same microsecond never collide.
@@ -126,7 +157,7 @@ class EncryptedBackend with DisposeGuard implements StorageBackend {
     final shouldEncrypt = options.encrypt ?? encryptByDefault;
 
     if (!shouldEncrypt) {
-      return _inner.write(key, bytes, options);
+      return _inner.write(key, bytes, _plaintextOptions(options));
     }
 
     final encKey = await _resolveKey(key, options);
@@ -134,11 +165,11 @@ class EncryptedBackend with DisposeGuard implements StorageBackend {
 
     final encOptions = WriteOptions(
       contentType: options.contentType,
-      metadata: {
-        ...options.metadata,
-        _metaEncrypted: 'true',
-        _metaOriginalSize: bytes.length.toString(),
-      },
+      metadata: _withEncryption(
+        options.metadata,
+        encrypted: true,
+        originalSize: bytes.length,
+      ),
     );
     return _inner.write(key, encrypted, encOptions);
   }
@@ -153,7 +184,7 @@ class EncryptedBackend with DisposeGuard implements StorageBackend {
     final shouldEncrypt = options.encrypt ?? encryptByDefault;
 
     if (!shouldEncrypt) {
-      return _inner.writeStream(key, byteStream, options);
+      return _inner.writeStream(key, byteStream, _plaintextOptions(options));
     }
 
     final encKey = await _resolveKey(key, options);
@@ -173,13 +204,13 @@ class EncryptedBackend with DisposeGuard implements StorageBackend {
     final encryptedStream = _encryptor.encryptStream(countingStream, encKey);
 
     // Write encrypted stream to the inner backend.
-    // Initial metadata has _metaEncrypted flag but not originalSize
+    // Initial metadata has the encrypted flag but not originalSize
     // (we don't know it yet — the stream hasn't been fully consumed).
     // onProgress is deliberately absent: the counting stream above
     // already reports it in plaintext space.
     final encOptions = WriteOptions(
       contentType: options.contentType,
-      metadata: {...options.metadata, _metaEncrypted: 'true'},
+      metadata: _withEncryption(options.metadata, encrypted: true),
     );
 
     await _inner.writeStream(key, encryptedStream, encOptions);
@@ -192,11 +223,11 @@ class EncryptedBackend with DisposeGuard implements StorageBackend {
     await _inner.updateMetadata(
       key,
       contentType: options.contentType,
-      metadata: {
-        ...options.metadata,
-        _metaEncrypted: 'true',
-        _metaOriginalSize: totalPlainSize.toString(),
-      },
+      metadata: _withEncryption(
+        options.metadata,
+        encrypted: true,
+        originalSize: totalPlainSize,
+      ),
     );
   }
 
@@ -235,7 +266,7 @@ class EncryptedBackend with DisposeGuard implements StorageBackend {
     final info = await _inner.head(key);
     if (info == null) throw FileNotFoundError(key);
 
-    if (info.metadata[_metaEncrypted] != 'true') {
+    if (!_isEncrypted(info)) {
       yield* _inner.readStream(key);
       return;
     }
@@ -276,7 +307,7 @@ class EncryptedBackend with DisposeGuard implements StorageBackend {
     final info = await _inner.head(key);
     if (info == null) throw FileNotFoundError(key);
 
-    if (info.metadata[_metaEncrypted] != 'true') {
+    if (!_isEncrypted(info)) {
       return _inner.readRange(key, start: start, length: length);
     }
 
@@ -338,13 +369,16 @@ class EncryptedBackend with DisposeGuard implements StorageBackend {
     // resolve from the header / ciphertext framing. A header that can't
     // even parse means the object can't be decrypted at all — surface
     // that as corruption instead of quietly reporting ciphertext size.
-    if (info.metadata[_metaEncrypted] == 'true') {
-      final sidecarSize = int.tryParse(info.metadata[_metaOriginalSize] ?? '');
+    if (_isEncrypted(info)) {
+      // The caller reads one stable name for cellar's two keys, whether the
+      // object was written now or by cellar 1.0.0.
+      final shown = CellarMetadata.encryptionForCaller(info.metadata);
+      final sidecarSize = _recordedSize(info);
       if (sidecarSize != null) {
-        return info.copyWith(size: sidecarSize);
+        return info.copyWith(size: sidecarSize, metadata: shown);
       }
       final g = await _resolveGeometry(key, info);
-      return info.copyWith(size: g.originalSize);
+      return info.copyWith(size: g.originalSize, metadata: shown);
     }
 
     return info;
@@ -389,13 +423,11 @@ class EncryptedBackend with DisposeGuard implements StorageBackend {
         .where((info) => !info.key.contains(decryptTempMarker))
         // Correct sizes for encrypted files using sidecar metadata.
         .map((info) {
-          if (info.metadata[_metaEncrypted] == 'true') {
-            final originalSize = int.tryParse(
-              info.metadata[_metaOriginalSize] ?? '',
+          if (_isEncrypted(info)) {
+            return info.copyWith(
+              size: _recordedSize(info),
+              metadata: CellarMetadata.encryptionForCaller(info.metadata),
             );
-            if (originalSize != null) {
-              return info.copyWith(size: originalSize);
-            }
           }
           return info;
         })
@@ -410,7 +442,7 @@ class EncryptedBackend with DisposeGuard implements StorageBackend {
     final info = await _inner.head(sourceKey);
     if (info == null) throw FileNotFoundError(sourceKey);
 
-    if (info.metadata[_metaEncrypted] != 'true') {
+    if (!_isEncrypted(info)) {
       // Not encrypted — simple copy
       return _inner.copy(sourceKey, destKey);
     }
@@ -436,8 +468,9 @@ class EncryptedBackend with DisposeGuard implements StorageBackend {
     }
 
     // Read-decrypt source → write-encrypt dest, carrying the user metadata
-    // across. writeStream re-derives the internal _metaEncrypted/_metaOriginalSize
-    // flags for the destination, so passing them straight through is harmless.
+    // across. writeStream re-derives cellar.encrypted and cellar.originalSize for
+    // the destination, replacing whatever the source's head carried, so passing
+    // them straight through is harmless.
     final plainStream = readStream(sourceKey);
     await writeStream(
       destKey,
@@ -446,7 +479,10 @@ class EncryptedBackend with DisposeGuard implements StorageBackend {
         encrypt: true,
         encryptionKey: destEncKey,
         contentType: info.contentType,
-        metadata: info.metadata,
+        // An object written by cellar 1.0.0 carries its encryption keys under
+        // the old names; map them first so they are not carried over as if they
+        // were the caller's own.
+        metadata: CellarMetadata.encryptionForCaller(info.metadata),
       ),
     );
   }
@@ -460,29 +496,52 @@ class EncryptedBackend with DisposeGuard implements StorageBackend {
     Map<String, String> metadata = const {},
   }) async {
     checkNotDisposed();
-    // Preserve the internal encryption flags. metadata is REPLACED, not merged,
-    // so passing only user metadata would strip _metaEncrypted/_metaOriginalSize —
-    // leaving readStream, readRange, and head unable to tell the object is
-    // encrypted, handing back ciphertext as plaintext.
+    // Preserve the internal encryption keys. metadata is REPLACED, not merged,
+    // so passing only user metadata would strip cellar.encrypted and
+    // cellar.originalSize, leaving readStream, readRange and head unable to tell
+    // the object is encrypted, handing back ciphertext as plaintext. An object
+    // written by cellar 1.0.0 is rewritten under the current names here.
     final info = await _inner.head(key);
-    if (info == null || info.metadata[_metaEncrypted] != 'true') {
+    if (info == null) {
       return _inner.updateMetadata(
         key,
         contentType: contentType,
         metadata: metadata,
       );
     }
-    final originalSize = info.metadata[_metaOriginalSize];
+    final encrypted = _isEncrypted(info);
+    final currentFormat = info.metadata.containsKey(
+      CellarMetadata.encrypted.name,
+    );
+    if (!encrypted && !currentFormat) {
+      // Plaintext written by cellar 1.0.0: it carries no marker, and the new
+      // format's marker is added so the caller's own keys are theirs from now on.
+      return _inner.updateMetadata(
+        key,
+        contentType: contentType,
+        metadata: _withEncryption(metadata, encrypted: false),
+      );
+    }
     return _inner.updateMetadata(
       key,
       contentType: contentType,
-      metadata: {
-        ...metadata,
-        _metaEncrypted: 'true',
-        _metaOriginalSize: ?originalSize,
-      },
+      metadata: _withEncryption(
+        metadata,
+        encrypted: encrypted,
+        originalSize: encrypted ? _recordedSize(info) : null,
+      ),
     );
   }
+
+  /// [options] for an object this layer stores as plaintext: the same, with the
+  /// marker saying it is not encrypted.
+  WriteOptions _plaintextOptions(WriteOptions options) => WriteOptions(
+    encrypt: options.encrypt,
+    encryptionKey: options.encryptionKey,
+    contentType: options.contentType,
+    metadata: _withEncryption(options.metadata, encrypted: false),
+    onProgress: options.onProgress,
+  );
 
   // ── Private helpers ──
 
@@ -520,7 +579,7 @@ class EncryptedBackend with DisposeGuard implements StorageBackend {
 
     var originalSize = header.originalSize > 0
         ? header.originalSize
-        : int.tryParse(info.metadata[_metaOriginalSize] ?? '') ?? 0;
+        : _recordedSize(info) ?? 0;
     var chunkCount = originalSize > 0
         ? (originalSize + header.chunkSize - 1) ~/ header.chunkSize
         : header.chunkCount;
@@ -573,7 +632,7 @@ class EncryptedBackend with DisposeGuard implements StorageBackend {
     final info = await _inner.head(key);
     if (info == null) throw FileNotFoundError(key);
 
-    final isEncrypted = info.metadata[_metaEncrypted] == 'true';
+    final isEncrypted = _isEncrypted(info);
 
     // Unencrypted or caller wants raw ciphertext — pass through.
     // `decrypt: false` on an encrypted file is a deliberate "give me the

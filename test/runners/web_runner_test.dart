@@ -17,6 +17,7 @@ import '../batteries/core_battery.dart';
 import '../batteries/encrypted_battery.dart';
 import '../batteries/eviction_battery.dart';
 import '../batteries/forwarding_battery.dart';
+import '../batteries/metadata_keys_battery.dart';
 import '../batteries/scope_battery.dart';
 import '../batteries/stack_battery.dart';
 import '../harness/fake_encryptor.dart';
@@ -56,6 +57,7 @@ void main() {
   runCellarBattery();
   runEvictionBattery();
   runBudgetBattery();
+  runMetadataKeysBattery();
   runStackBattery();
 
   // ── Browser-only: the substrate a VM cannot host ──
