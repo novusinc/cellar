@@ -326,3 +326,15 @@ tombstones, real Chrome IndexedDB) run in its full-test CI matrix.
 > plain-named switch files with stub defaults; OS quirks live behind
 > one seam. The conformance battery IS the contract, and it runs
 > identically on the VM and in real Chrome.**
+
+## Metadata keys cellar owns
+
+The chunked layer keeps its chunk pointer and size, and the encryption layer its
+flag and plaintext size, in the same string map as the caller's metadata. Those
+keys are `cellar.generation`, `cellar.chunkCount`, `cellar.totalSize`,
+`cellar.encrypted` and `cellar.originalSize` (`core/metadata_keys.dart`). The
+layer that owns a key adds the prefix; callers pass and read their own keys as
+given. Cellar 1.0.0 stored them unprefixed, so every read falls back to the old
+names for an object that lacks the layer's marker (`cellar.generation` for a
+manifest, `cellar.encrypted` for an encrypted-layer object), and every write
+uses the new ones.
