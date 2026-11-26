@@ -16,6 +16,7 @@ import '../batteries/encrypted_battery.dart';
 import '../batteries/eviction_battery.dart';
 import '../batteries/forwarding_battery.dart';
 import '../batteries/metadata_keys_battery.dart';
+import '../batteries/reserved_prefix_battery.dart';
 import '../batteries/scope_battery.dart';
 import '../batteries/stack_battery.dart';
 import '../batteries/verifying_battery.dart';
@@ -54,6 +55,7 @@ void main() {
   runEvictionBattery();
   runBudgetBattery();
   runMetadataKeysBattery();
+  runReservedPrefixBattery();
 
   // ── AccessTrackingBackend over each stack the runner can host ──
   runAccessTrackingBattery('InMemoryBackend', create: InMemoryBackend.new);

@@ -12,7 +12,15 @@ import 'package:cellar/src/cellar/storage_roots.dart';
 import 'package:cellar/src/cellar/storage_scope.dart';
 import 'package:cellar/src/cellar/lifecycle.dart';
 import 'package:cellar/src/cellar/byte_budget.dart';
+import 'package:cellar/src/cellar/eviction_policy.dart'
+    show accessCountMetadataKey, accessedAtMetadataKey;
 import 'package:cellar/src/cellar/lifecycle_runner.dart';
+import 'package:cellar/src/core/metadata_keys.dart';
+import 'package:cellar/src/decorators/verifying/verifying_backend.dart'
+    show
+        contentDigestAlgorithmMetadataKey,
+        contentDigestMetadataKey,
+        contentSizeMetadataKey;
 import 'package:cellar/src/cellar/partition_config.dart';
 
 /// Cross-platform object storage.
@@ -361,15 +369,18 @@ class Cellar {
     String? contentType,
     Map<String, String> metadata = const {},
     bool? encrypt,
-  }) => _scopeFor(partition).write(
-    key,
-    bytes,
-    WriteOptions(
-      contentType: contentType,
-      metadata: metadata,
-      encrypt: encrypt,
-    ),
-  );
+  }) async {
+    final callerMetadata = _callerMetadata(metadata);
+    return _scopeFor(partition).write(
+      key,
+      bytes,
+      WriteOptions(
+        contentType: contentType,
+        metadata: callerMetadata,
+        encrypt: encrypt,
+      ),
+    );
+  }
 
   /// Stream bytes into [key]. Constant memory regardless of total size.
   ///
@@ -384,16 +395,19 @@ class Cellar {
     Map<String, String> metadata = const {},
     bool? encrypt,
     void Function(int bytesWritten, int? totalBytes)? onProgress,
-  }) => _scopeFor(partition).writeStream(
-    key,
-    byteStream,
-    WriteOptions(
-      contentType: contentType,
-      metadata: metadata,
-      encrypt: encrypt,
-      onProgress: onProgress,
-    ),
-  );
+  }) async {
+    final callerMetadata = _callerMetadata(metadata);
+    return _scopeFor(partition).writeStream(
+      key,
+      byteStream,
+      WriteOptions(
+        contentType: contentType,
+        metadata: callerMetadata,
+        encrypt: encrypt,
+        onProgress: onProgress,
+      ),
+    );
+  }
 
   // ══════════════════════════════════════════════════════════════════════
   // READ
@@ -434,9 +448,12 @@ class Cellar {
     String? contentType,
     Map<String, String> metadata = const {},
     String? partition,
-  }) => _scopeFor(
-    partition,
-  ).updateMetadata(key, contentType: contentType, metadata: metadata);
+  }) async {
+    final callerMetadata = _callerMetadata(metadata);
+    return _scopeFor(
+      partition,
+    ).updateMetadata(key, contentType: contentType, metadata: callerMetadata);
+  }
 
   // ══════════════════════════════════════════════════════════════════════
   // DELETE
@@ -634,6 +651,45 @@ class Cellar {
   // ══════════════════════════════════════════════════════════════════════
   // INTERNALS
   // ══════════════════════════════════════════════════════════════════════
+
+  /// The keys cellar itself puts in an object's metadata and shows back from `head`
+  /// and `list`: a caller who read them and passes the map on (as cellar's own copy
+  /// functions do) is not refused, and the values it passes are ignored, because
+  /// cellar sets them from what is true of the object.
+  static final Set<String> _cellarReturnedKeys = {
+    CellarMetadata.encrypted.name,
+    CellarMetadata.originalSize.name,
+    accessedAtMetadataKey,
+    accessCountMetadataKey,
+    contentSizeMetadataKey,
+    contentDigestMetadataKey,
+    contentDigestAlgorithmMetadataKey,
+  };
+
+  /// [metadata] as the caller's own: the `cellar.` prefix belongs to cellar, so a
+  /// key in it that cellar does not return is a programmer's mistake and throws an
+  /// [ArgumentError]; one it does return is dropped (see [_cellarReturnedKeys]).
+  /// Other keys are stored exactly as given. Layers below the facade, including
+  /// cellar's own copy functions, are not checked.
+  static Map<String, String> _callerMetadata(Map<String, String> metadata) {
+    if (!metadata.keys.any((k) => k.startsWith(cellarMetadataPrefix))) {
+      return metadata;
+    }
+    final out = <String, String>{};
+    for (final entry in metadata.entries) {
+      if (!entry.key.startsWith(cellarMetadataPrefix)) {
+        out[entry.key] = entry.value;
+      } else if (!_cellarReturnedKeys.contains(entry.key)) {
+        throw ArgumentError.value(
+          entry.key,
+          'metadata',
+          'keys starting with "$cellarMetadataPrefix" are reserved for cellar; '
+              'name your own key without the prefix',
+        );
+      }
+    }
+    return out;
+  }
 
   StorageScope _scopeFor(String? partition) {
     _assertOpen();

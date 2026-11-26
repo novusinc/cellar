@@ -39,11 +39,14 @@ void runEvictionBattery() {
       Map<String, Map<String, String>> metadata = const {},
     }) async {
       for (var i = 0; i < keys.length; i++) {
-        await cellar.write(
-          keys[i],
-          sized(10),
-          metadata: metadata[keys[i]] ?? const {},
-        );
+        final tags = metadata[keys[i]];
+        if (tags == null) {
+          await cellar.write(keys[i], sized(10));
+        } else {
+          // cellar.* keys are cellar's: the facade ignores a caller's, so they are
+          // written the way a decorator writes them, beneath it.
+          await backing.write(keys[i], sized(10), WriteOptions(metadata: tags));
+        }
         backing.setLastModified(keys[i], DateTime.utc(2020, 1, 1, 0, 0, i));
       }
     }
