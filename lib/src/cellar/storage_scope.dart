@@ -86,6 +86,15 @@ class StorageScope {
         : info;
   }
 
+  /// The objects of [raw] (as the backend names them) that belong to this scope, with
+  /// the tenant prefix stripped: what [list] would return for them. For a caller that
+  /// already holds the backend's objects, such as a `UsageLedger`.
+  List<ObjectInfo> scoped(Iterable<ObjectInfo> raw) => [
+    for (final info in raw)
+      if (keyPrefix == null || info.key.startsWith('$keyPrefix/'))
+        _unscoped(info),
+  ];
+
   // ══════════════════════════════════════════════════════════════════════════
   // WRITE
   // ══════════════════════════════════════════════════════════════════════════

@@ -76,6 +76,36 @@ void runStackBattery() {
       });
     });
 
+    group('LedgerBackend over Encrypted over Chunked', () {
+      test(
+        'holds the plain sizes a listing returns, not the stored ones',
+        () async {
+          final backing = InMemoryBackend();
+          final ledger = LedgerBackend(
+            EncryptedBackend(
+              inner: ChunkedBackend(backing: backing, chunkSize: 64),
+              encryptor: FakeEncryptor(),
+              keyResolver: const FixedKeyResolver('test-key'),
+              encryptByDefault: true,
+            ),
+          );
+
+          for (final size in [0, 1, 63, 64, 65, 200, 1024]) {
+            await ledger.write('size-$size', seq(size));
+          }
+          await ledger.delete('size-1');
+
+          final listed = await ledger.list('');
+          expect(
+            ledger.ledger.totalBytes,
+            listed.fold<int>(0, (a, i) => a + i.size),
+          );
+          expect(ledger.ledger['size-200']?.size, 200);
+          expect(ledger.ledger['size-1'], isNull);
+        },
+      );
+    });
+
     group('Cellar facade wraps the stack transparently', () {
       late InMemoryBackend backing;
       late Cellar cellar;
