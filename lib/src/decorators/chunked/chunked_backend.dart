@@ -7,6 +7,7 @@ import 'package:cellar/src/core/object_info.dart';
 import 'package:cellar/src/core/write_options.dart';
 import 'package:cellar/src/core/errors.dart';
 import 'package:cellar/src/core/metadata_keys.dart';
+import 'package:cellar/src/core/metadata_patchable.dart' as patch;
 
 /// A backing that can list just the records whose key ends with a suffix, without
 /// touching the others.
@@ -81,7 +82,9 @@ abstract interface class SuffixListableBackend implements StorageBackend {
 /// arbitrarily-large object as a platform-local handle is
 /// platform-specific (filesystem path on native, Blob URL on web).
 /// Subclasses or wrapping decorators provide it.
-class ChunkedBackend with DisposeGuard implements StorageBackend {
+class ChunkedBackend
+    with DisposeGuard
+    implements patch.MetadataPatchableBackend {
   /// Wrap [backing], splitting every object into [chunkSize]-byte records.
   ChunkedBackend({
     required StorageBackend backing,
@@ -497,6 +500,17 @@ class ChunkedBackend with DisposeGuard implements StorageBackend {
         metadata,
       ),
     );
+  }
+
+  /// Patch the caller's metadata keys of the object's manifest record, leaving the
+  /// chunk pointer and size as they are at that instant when the backing can merge
+  /// atomically (IndexedDB does, in one transaction), so a writer that commits a new
+  /// generation meanwhile is not overwritten by a stale pointer.
+  @override
+  Future<void> patchMetadata(String key, Map<String, String?> changes) async {
+    checkNotDisposed();
+    if (!await _backing.exists(_manifestKey(key))) throw FileNotFoundError(key);
+    return patch.patchMetadata(_backing, _manifestKey(key), changes);
   }
 
   // ══════════════════════════════════════════════════════════════════════

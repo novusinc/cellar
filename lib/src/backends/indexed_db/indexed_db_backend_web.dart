@@ -7,6 +7,7 @@ import 'package:web/web.dart' as web;
 import 'package:cellar/src/decorators/chunked/chunked_backend.dart';
 import 'package:cellar/src/core/dispose_guard.dart';
 import 'package:cellar/src/core/materialized_file.dart';
+import 'package:cellar/src/core/metadata_patchable.dart';
 import 'package:cellar/src/core/object_info.dart';
 import 'package:cellar/src/core/write_options.dart';
 import 'package:cellar/src/core/errors.dart';
@@ -123,7 +124,9 @@ class IndexedDbBackend extends ChunkedBackend {
 // backing — no JS runtime required for unit tests.
 // ══════════════════════════════════════════════════════════════════════════
 
-class _RawIndexedDbBackend with DisposeGuard implements SuffixListableBackend {
+class _RawIndexedDbBackend
+    with DisposeGuard
+    implements SuffixListableBackend, MetadataPatchableBackend {
   _RawIndexedDbBackend({required String dbName}) : _dbName = dbName;
   final String _dbName;
   static const _storeName = 'files';
@@ -462,6 +465,30 @@ class _RawIndexedDbBackend with DisposeGuard implements SuffixListableBackend {
       bytes,
       contentType,
       metadata,
+      writtenAt: writtenAt.isA<JSNumber>() ? writtenAt : null,
+    );
+    await _send(key, () => store.put(record, key.toJS));
+    await tx.done;
+  }
+
+  /// Merge [changes] into the record's metadata in ONE read-write transaction:
+  /// get, merge, put. The record is read where it is written, so whatever it holds
+  /// at that instant is kept (a chunk pointer a writer just committed included),
+  /// and IndexedDB makes the transaction atomic across tabs, so no lock is needed.
+  /// The bytes, the content type and `writtenAt` are carried forward unchanged.
+  @override
+  Future<void> patchMetadata(String key, Map<String, String?> changes) async {
+    final tx = await _writeTransaction(key);
+    final store = tx.store;
+    final result = await _request(store.get(key.toJS), key: key);
+    if (result == null) throw FileNotFoundError(key);
+
+    final info = _parseObjectInfo(key, result);
+    final writtenAt = (result as _IdbRecord).writtenAt;
+    final record = _buildRecord(
+      _extractBody(key, result),
+      info.contentType,
+      applyMetadataChanges(info.metadata, changes),
       writtenAt: writtenAt.isA<JSNumber>() ? writtenAt : null,
     );
     await _send(key, () => store.put(record, key.toJS));

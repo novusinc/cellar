@@ -5,6 +5,7 @@ import 'package:cellar/src/decorators/encrypted/file_encryptor.dart';
 import 'package:cellar/src/decorators/encrypted/encryption_key_resolver.dart';
 import 'package:cellar/src/core/errors.dart';
 import 'package:cellar/src/core/metadata_keys.dart';
+import 'package:cellar/src/core/metadata_patchable.dart' as patch;
 import 'package:cellar/src/core/storage_backend.dart';
 import 'package:cellar/src/core/dispose_guard.dart';
 import 'package:cellar/src/core/materialized_file.dart';
@@ -53,7 +54,9 @@ import 'package:cellar/src/core/write_options.dart';
 // 3. copy() re-encrypts when source and destination resolve to
 //    different encryption keys (cross-tenant copies, key rotation).
 //    Same-key copies fall through to a raw byte copy.
-class EncryptedBackend with DisposeGuard implements StorageBackend {
+class EncryptedBackend
+    with DisposeGuard
+    implements patch.MetadataPatchableBackend {
   /// Wrap [inner] with transparent encryption via [encryptor], resolving
   /// per-object keys through [keyResolver] (or explicit per-write keys).
   EncryptedBackend({
@@ -542,6 +545,15 @@ class EncryptedBackend with DisposeGuard implements StorageBackend {
     metadata: _withEncryption(options.metadata, encrypted: false),
     onProgress: options.onProgress,
   );
+
+  /// Patch the metadata through to the inner backend, atomically when it can. The
+  /// layer's own keys are in the map and stay as they are unless `changes` names
+  /// them, so a patch of the caller's keys cannot strip `cellar.encrypted`.
+  @override
+  Future<void> patchMetadata(String key, Map<String, String?> changes) async {
+    checkNotDisposed();
+    return patch.patchMetadata(_inner, key, changes);
+  }
 
   // ── Private helpers ──
 

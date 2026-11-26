@@ -24,6 +24,7 @@ import '../batteries/verifying_battery.dart';
 import '../harness/fake_encryptor.dart';
 import '../platform/web/indexed_db_blob_battery.dart';
 import '../platform/web/indexed_db_list_battery.dart';
+import '../platform/web/indexed_db_patch_battery.dart';
 import '../platform/web/indexed_db_quota_battery.dart';
 
 import 'package:cellar/cellar_lowlevel.dart';
@@ -90,5 +91,6 @@ void main() {
     create: () => IndexedDbBackend(dbName: 'cellar_verifying_${dbCounter++}'),
   );
   runIndexedDbListBattery();
+  runIndexedDbPatchBattery();
   runIndexedDbQuotaBattery();
 }

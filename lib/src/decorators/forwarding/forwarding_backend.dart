@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:cellar/src/core/dispose_guard.dart';
 import 'package:cellar/src/core/materialized_file.dart';
+import 'package:cellar/src/core/metadata_patchable.dart' as patch;
 import 'package:cellar/src/core/object_info.dart';
 import 'package:cellar/src/core/storage_backend.dart';
 import 'package:cellar/src/core/write_options.dart';
@@ -32,7 +33,9 @@ import 'package:cellar/src/core/write_options.dart';
 /// [dispose], every forwarded method fails with [StateError], as the contract
 /// requires, without reaching [inner]. An override that does not call `super`
 /// skips that check, so call `checkNotDisposed()` first in it.
-class ForwardingBackend with DisposeGuard implements StorageBackend {
+class ForwardingBackend
+    with DisposeGuard
+    implements patch.MetadataPatchableBackend {
   /// Wraps [inner]; the caller keeps ownership of it.
   ForwardingBackend(this.inner);
 
@@ -142,6 +145,14 @@ class ForwardingBackend with DisposeGuard implements StorageBackend {
   }) async {
     checkNotDisposed();
     return inner.materialize(key, decrypt: decrypt, exclusive: exclusive);
+  }
+
+  /// Patches through to [inner] atomically when it can, and as `head` plus
+  /// `updateMetadata` (not atomic) when it cannot: see [patch.patchMetadata].
+  @override
+  Future<void> patchMetadata(String key, Map<String, String?> changes) async {
+    checkNotDisposed();
+    return patch.patchMetadata(inner, key, changes);
   }
 
   /// Disposes this wrapper only; [inner] belongs to whoever created it.
