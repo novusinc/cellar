@@ -7,6 +7,8 @@ import 'package:cellar/src/core/object_info.dart';
 import 'package:cellar/src/core/storage_backend.dart';
 import 'package:cellar/src/core/write_options.dart';
 import 'package:cellar/src/decorators/encrypted/encrypted_backend.dart';
+import 'package:cellar/src/decorators/ledger/ledger_backend.dart';
+import 'package:cellar/src/decorators/ledger/usage_ledger.dart';
 import 'package:cellar/src/cellar/cellar_encryption.dart';
 import 'package:cellar/src/cellar/storage_roots.dart';
 import 'package:cellar/src/cellar/storage_scope.dart';
@@ -271,6 +273,7 @@ class Cellar {
   Future<void> _openOnce() async {
     final rawBackends = <String, StorageBackend>{};
     final scopes = <String, StorageScope>{};
+    final ledgers = <String, UsageLedger>{};
     final runner = LifecycleRunner(onEvictionError: onEvictionError);
 
     for (final entry in _partitions.entries) {
@@ -295,10 +298,32 @@ class Cellar {
           encryptByDefault: enc.encryptByDefault,
         );
       }
+      // A partition that keeps its cap as it is written to needs the tally of what it
+      // holds. One already in the stack (the application placed it where it sees every
+      // change) is the one used; otherwise the cellar puts its own on top.
+      UsageLedger? ledger;
+      if (_wantsLedger(partitionName, cfg.lifecycle)) {
+        ledger = usageLedgerOf(backend);
+        if (ledger == null) {
+          final wrapped = LedgerBackend(
+            backend,
+            onError: (key, error) =>
+                onEvictionError?.call(partitionName, key, error),
+          );
+          backend = wrapped;
+          ledger = wrapped.ledger;
+        }
+        ledgers[partitionName] = ledger;
+      }
       scopes[partitionName] = StorageScope(backend, keyPrefix: keyPrefix);
 
       if (cfg.lifecycle != null) {
-        runner.register(partitionName, scopes[partitionName]!, cfg.lifecycle!);
+        runner.register(
+          partitionName,
+          scopes[partitionName]!,
+          cfg.lifecycle!,
+          ledger: ledger,
+        );
       }
     }
 
@@ -307,7 +332,12 @@ class Cellar {
     for (final entry in _budgets.entries) {
       for (final member in entry.value.partitions) {
         if (_partitions[member]!.lifecycle == null) {
-          runner.register(member, scopes[member]!, const Lifecycle());
+          runner.register(
+            member,
+            scopes[member]!,
+            const Lifecycle(),
+            ledger: ledgers[member],
+          );
         }
       }
       runner.registerBudget(entry.key, entry.value);
@@ -331,7 +361,8 @@ class Cellar {
   /// you're done with them.
   Future<void> close() async {
     if (_closed) return;
-    _lifecycleRunner?.dispose();
+    // A pass in flight finishes its eviction before the backends go.
+    await _lifecycleRunner?.stop();
     _lifecycleRunner = null;
     if (_origin != _Origin.withBackends) {
       for (final backend in _rawBackends?.values ?? const <StorageBackend>[]) {
@@ -641,6 +672,18 @@ class Cellar {
   // TEST HOOKS
   // ══════════════════════════════════════════════════════════════════════
 
+  /// Wait until the eviction passes that writes started have finished.
+  ///
+  /// A partition that enforces its cap on write (`Lifecycle.enforceOnWrite`)
+  /// evicts in the background after a write that takes it over: the write does not
+  /// wait for that. A caller that must see the partition under its cap (a test, a
+  /// shutdown, a screen showing what is stored) waits here. Returns at once when
+  /// nothing is running.
+  Future<void> settle() async {
+    _assertOpen();
+    await _lifecycleRunner?.idle();
+  }
+
   /// Run lifecycle eviction for every partition immediately instead of
   /// waiting for the next timer tick — e.g. after a bulk import that
   /// blew past a cache cap. No-op when no partition has rules.
@@ -703,6 +746,20 @@ class Cellar {
       );
     }
     return scope;
+  }
+
+  /// Whether [partition] needs a usage ledger: it enforces a cap of its own on write,
+  /// or is a member of a budget that does.
+  bool _wantsLedger(String partition, Lifecycle? lifecycle) {
+    if (lifecycle != null &&
+        lifecycle.enforceOnWrite &&
+        lifecycle.maxBytes != null) {
+      return true;
+    }
+    return _budgets.values.any(
+      (budget) =>
+          budget.enforceOnWrite && budget.partitions.contains(partition),
+    );
   }
 
   /// Reject a budget that cannot work, at construction: no members, an unknown

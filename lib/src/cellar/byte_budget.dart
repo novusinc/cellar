@@ -36,6 +36,7 @@ class ByteBudget {
     required this.partitions,
     this.evictionPolicy = EvictionPolicy.oldestWritten,
     this.runInterval = const Duration(hours: 1),
+    this.enforceOnWrite = false,
   });
 
   /// The most bytes the member partitions hold between them. Must be positive.
@@ -53,4 +54,11 @@ class ByteBudget {
   /// How often the budget is checked, with the partitions' own rules (a single timer
   /// runs at the shortest interval anywhere in the cellar). Default one hour.
   final Duration runInterval;
+
+  /// Keep the members under [maxBytes] as they are written to, not only when the timer
+  /// fires: a write that takes their total over it starts an eviction pass at once, in
+  /// the background. As for `Lifecycle.enforceOnWrite`, which see: every member keeps a
+  /// `UsageLedger`, so a write that leaves the total under the cap costs no listing.
+  /// Off by default.
+  final bool enforceOnWrite;
 }

@@ -16,6 +16,7 @@ import '../batteries/encrypted_battery.dart';
 import '../batteries/eviction_battery.dart';
 import '../batteries/forwarding_battery.dart';
 import '../batteries/hooks_battery.dart';
+import '../batteries/ledger_battery.dart';
 import '../batteries/metadata_keys_battery.dart';
 import '../batteries/reserved_prefix_battery.dart';
 import '../batteries/scope_battery.dart';
@@ -38,6 +39,16 @@ void main() {
         ChunkedBackend(backing: InMemoryBackend(), chunkSize: 64 * 1024),
   );
   runStorageBackendConformance(
+    'LedgerBackend over InMemory',
+    create: () => LedgerBackend(InMemoryBackend()),
+  );
+  runStorageBackendConformance(
+    'LedgerBackend over ChunkedBackend over InMemory',
+    create: () => LedgerBackend(
+      ChunkedBackend(backing: InMemoryBackend(), chunkSize: 64 * 1024),
+    ),
+  );
+  runStorageBackendConformance(
     'EncryptedBackend over InMemory',
     create: () => EncryptedBackend(
       inner: InMemoryBackend(),
@@ -55,6 +66,7 @@ void main() {
   runCellarBattery();
   runEvictionBattery();
   runBudgetBattery();
+  runLedgerBattery();
   runMetadataKeysBattery();
   runReservedPrefixBattery();
 

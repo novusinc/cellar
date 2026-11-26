@@ -80,6 +80,10 @@ export 'src/decorators/access/access_tracking_backend.dart'
 export 'src/decorators/forwarding/forwarding_backend.dart'
     show ForwardingBackend;
 export 'src/decorators/hooks/hooked_backend.dart' show HookedBackend;
+export 'src/decorators/ledger/ledger_backend.dart'
+    show LedgerBackend, usageLedgerOf;
+export 'src/decorators/ledger/usage_ledger.dart'
+    show LedgerGrowthListener, UsageLedger;
 export 'src/decorators/hooks/storage_hooks.dart'
     show
         AfterDeleteHook,

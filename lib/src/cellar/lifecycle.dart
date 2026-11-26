@@ -31,6 +31,7 @@ class Lifecycle {
     this.canEvict,
     this.evictionGuard,
     this.onEvicted,
+    this.enforceOnWrite = false,
   });
 
   /// Cache-style lifecycle. Bounded by [maxBytes] and/or [maxAge]; OS may
@@ -50,6 +51,7 @@ class Lifecycle {
     this.canEvict,
     this.evictionGuard,
     this.onEvicted,
+    this.enforceOnWrite = false,
   }) : wipeOnOpen = false;
 
   /// Scratch-style lifecycle. Wipes the partition every time `Cellar.open`
@@ -62,7 +64,8 @@ class Lifecycle {
       evictionPolicy = EvictionPolicy.oldestWritten,
       canEvict = null,
       evictionGuard = null,
-      onEvicted = null;
+      onEvicted = null,
+      enforceOnWrite = false;
 
   /// Total bytes cap. When exceeded, items are evicted in [evictionPolicy]
   /// order (oldest written first, unless another is chosen) until under the
@@ -114,6 +117,25 @@ class Lifecycle {
 
   /// Told after each eviction, with why. Null means no observer.
   final EvictionCallback? onEvicted;
+
+  /// Keep the partition under [maxBytes] as it is written to, not only when the timer
+  /// fires. Off by default: eviction then happens on the timer alone, as it always has,
+  /// and a partition can sit over its cap for up to [runInterval].
+  ///
+  /// On, the cellar keeps a `UsageLedger` of the partition (its objects and their
+  /// total size, in memory, built from one listing at open and kept current by every
+  /// write and delete through the cellar). A write that takes the partition over its
+  /// cap starts an eviction pass at once, in the background, in [evictionPolicy]
+  /// order and through [canEvict] and [evictionGuard] as the timer's pass does. The
+  /// write does not wait for it, and a write that leaves the partition under its cap
+  /// costs one read of the object it wrote and no listing. Passes of one partition
+  /// never overlap: writes that arrive during one are covered by one more pass.
+  ///
+  /// The timer still runs: it expires what is past [maxAge], and its listing corrects
+  /// the ledger for anything that changed behind the cellar's back. Use
+  /// `Cellar.settle` to wait for the passes writes started. Has no effect without
+  /// [maxBytes] (or a `ByteBudget` the partition belongs to, with its own flag).
+  final bool enforceOnWrite;
 
   /// True if any rule is configured. Used internally to skip the runner
   /// for partitions with no policy.
