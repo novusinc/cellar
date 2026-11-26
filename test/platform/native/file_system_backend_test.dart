@@ -195,6 +195,35 @@ void main() {
           expect(info.lastModified, isNotNull);
         }
       });
+
+      // A listing reads its objects in batches. This is several batches long, so a
+      // result that went to the wrong key, or a batch that was dropped or read
+      // twice, shows as a size or a tag on the wrong object.
+      test('lists every object of a listing longer than one batch, each with '
+          'its own size and metadata', () async {
+        const count = 70;
+        await Future.wait([
+          for (var i = 0; i < count; i++)
+            backend.write(
+              'many/k$i',
+              Uint8List(i + 1),
+              WriteOptions(metadata: {'n': '$i'}),
+            ),
+        ]);
+
+        final results = await backend.list('many/');
+
+        expect(results, hasLength(count));
+        expect(
+          {for (final info in results) info.key},
+          {for (var i = 0; i < count; i++) 'many/k$i'},
+        );
+        for (final info in results) {
+          final n = int.parse(info.key.substring('many/k'.length));
+          expect(info.size, n + 1, reason: info.key);
+          expect(info.metadata['n'], '$n', reason: info.key);
+        }
+      });
     });
 
     group('copy', () {

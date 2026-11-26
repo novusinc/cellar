@@ -458,14 +458,23 @@ class FileSystemBackend
 
   // ── List ──
 
+  /// How many objects a listing reads at once. Each one is a stat and a sidecar
+  /// read, which wait on the disk and not on each other; a bound keeps a listing of
+  /// thousands from opening thousands of files together.
+  static const int _listConcurrency = 16;
+
   @override
   Future<List<ObjectInfo>> list(String prefix) async {
     checkNotDisposed();
     final keys = await _listKeys(prefix);
     final results = <ObjectInfo>[];
-    for (final key in keys) {
-      final info = await head(key);
-      if (info != null) results.add(info);
+    for (var i = 0; i < keys.length; i += _listConcurrency) {
+      final batch = keys.skip(i).take(_listConcurrency);
+      // Future.wait keeps the order of its input, so the result is in the
+      // order the keys were found, as when each was read in turn.
+      for (final info in await Future.wait(batch.map(head))) {
+        if (info != null) results.add(info);
+      }
     }
     return results;
   }
