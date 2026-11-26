@@ -9,6 +9,7 @@ import 'package:cellar/src/core/storage_backend.dart';
 import 'package:cellar/src/core/dispose_guard.dart';
 import 'package:cellar/src/core/errors.dart';
 import 'package:cellar/src/core/materialized_file.dart';
+import 'package:cellar/src/core/metadata_patchable.dart';
 import 'package:cellar/src/core/object_info.dart';
 import 'package:cellar/src/core/write_options.dart';
 
@@ -41,7 +42,7 @@ import 'package:cellar/src/core/write_options.dart';
 /// on macOS (the supported Time Machine mechanism). On Android / Linux /
 /// Windows the flag is a no-op. Applied lazily on the first write —
 /// there's no async setup step in the constructor.
-class FileSystemBackend with DisposeGuard implements StorageBackend {
+class FileSystemBackend with DisposeGuard implements MetadataPatchableBackend {
   /// Create a backend rooted at `baseDir`.
   ///
   /// [osBackup] (default `true`) controls whether the directory
@@ -504,6 +505,38 @@ class FileSystemBackend with DisposeGuard implements StorageBackend {
     if (stat.type == FileSystemEntityType.notFound) {
       throw FileNotFoundError(key);
     }
+    await _replaceSidecar(key, contentType, metadata, stat);
+  }
+
+  /// Merge [changes] into the sidecar and replace it atomically; the body, its
+  /// content type and its `lastModified` are not touched. The sidecar is read and
+  /// replaced in two steps, so a concurrent patch of the same key, or a write to it,
+  /// can lose one of them: same-key writes are the caller's to serialize.
+  @override
+  Future<void> patchMetadata(String key, Map<String, String?> changes) async {
+    checkNotDisposed();
+    final stat = await _file(key).stat();
+    if (stat.type == FileSystemEntityType.notFound) {
+      throw FileNotFoundError(key);
+    }
+    final current = await _readMeta(key, stat);
+    final contentType = current?['contentType'];
+    await _replaceSidecar(
+      key,
+      contentType is String ? contentType : null,
+      applyMetadataChanges(_castMetadata(current?['metadata']), changes),
+      stat,
+    );
+  }
+
+  /// Replace [key]'s sidecar with one holding [contentType] and [metadata] (or
+  /// none at all when both are empty), for the body whose `stat` is [stat].
+  Future<void> _replaceSidecar(
+    String key,
+    String? contentType,
+    Map<String, String> metadata,
+    FileStat stat,
+  ) async {
     if (!_hasMetadata(contentType, metadata)) {
       await _os.deleteFile(_metaFile(key));
       return;

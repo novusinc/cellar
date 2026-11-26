@@ -205,6 +205,91 @@ void runStorageBackendConformance(
       });
     });
 
+    // ── patchMetadata — change some keys, keep everything else ───────────
+    group('patchMetadata', () {
+      test(
+        'sets and removes the named keys and leaves everything else',
+        () async {
+          await backend.write(
+            'p',
+            bytes('the body'),
+            const WriteOptions(
+              contentType: 'a/b',
+              metadata: {'keep': '1', 'change': 'old', 'drop': 'x'},
+            ),
+          );
+          final before = (await backend.head('p'))!;
+
+          await Future<void>.delayed(const Duration(milliseconds: 30));
+          await patchMetadata(backend, 'p', {
+            'change': 'new',
+            'added': 'y',
+            'drop': null,
+          });
+
+          final after = (await backend.head('p'))!;
+          expect(after.metadata['keep'], '1');
+          expect(after.metadata['change'], 'new');
+          expect(after.metadata['added'], 'y');
+          expect(after.metadata.containsKey('drop'), isFalse);
+          expect(after.contentType, 'a/b');
+          expect(after.size, before.size);
+          expect(await backend.read('p'), bytes('the body'));
+          expect(
+            after.lastModified,
+            before.lastModified,
+            reason: 'a patch is not a write: it must not restart maxAge',
+          );
+        },
+      );
+
+      test('works on an object that has no metadata', () async {
+        await backend.write('q', bytes('x'));
+
+        await patchMetadata(backend, 'q', {'k': 'v'});
+
+        expect((await backend.head('q'))!.metadata['k'], 'v');
+        expect(await backend.read('q'), bytes('x'));
+      });
+
+      test('removing the last key leaves a readable object', () async {
+        await backend.write(
+          'r',
+          bytes('x'),
+          const WriteOptions(metadata: {'k': 'v'}),
+        );
+
+        await patchMetadata(backend, 'r', {'k': null});
+
+        expect((await backend.head('r'))!.metadata.containsKey('k'), isFalse);
+        expect(await backend.read('r'), bytes('x'));
+      });
+
+      test(
+        'a missing key throws FileNotFoundError and stores nothing',
+        () async {
+          await expectLater(
+            patchMetadata(backend, 'nope', {'k': 'v'}),
+            throwsA(isA<FileNotFoundError>()),
+          );
+          expect(await backend.exists('nope'), isFalse);
+        },
+      );
+
+      test('list agrees with head', () async {
+        await backend.write(
+          's',
+          bytes('x'),
+          const WriteOptions(metadata: {'a': '1'}),
+        );
+        await patchMetadata(backend, 's', {'a': '2', 'b': '3'});
+
+        final listed = (await backend.list('s')).single;
+        expect(listed.metadata['a'], '2');
+        expect(listed.metadata['b'], '3');
+      });
+    });
+
     // ── updateMetadata — replace semantics ──────────────────────────────
     group('updateMetadata', () {
       test('keeps lastModified: it is when the bytes were written', () async {

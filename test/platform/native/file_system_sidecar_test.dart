@@ -238,6 +238,49 @@ void main() {
     });
   });
 
+  group('patchMetadata', () {
+    test(
+      'merges into the sidecar atomically: a crash keeps the old one',
+      () async {
+        await backend.write(
+          'k',
+          bytes(10, 1),
+          const WriteOptions(contentType: 'a/b', metadata: {'v': '1'}),
+        );
+
+        os.crashOnRename = 1;
+        await expectLater(
+          backend.patchMetadata('k', {'v': '2', 'extra': 'x'}),
+          throwsA(isA<_Crash>()),
+        );
+
+        final info = await reopened().head('k');
+        expect(info!.metadata, {'v': '1'});
+        expect(info.contentType, 'a/b');
+      },
+    );
+
+    test(
+      'keeps the body, its lastModified and the sidecar\'s identity',
+      () async {
+        await backend.write(
+          'k',
+          bytes(10, 1),
+          const WriteOptions(contentType: 'a/b', metadata: {'v': '1'}),
+        );
+        final before = await backend.head('k');
+
+        await backend.patchMetadata('k', {'v': null, 'w': '2'});
+
+        final after = await backend.head('k');
+        expect(after!.metadata, {'w': '2'});
+        expect(after.contentType, 'a/b');
+        expect(after.lastModified, before!.lastModified);
+        expect(await backend.read('k'), bytes(10, 1));
+      },
+    );
+  });
+
   group('recovery at open', () {
     test('completes a write interrupted between the two promotes', () async {
       await backend.write(
