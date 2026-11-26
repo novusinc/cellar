@@ -6,7 +6,6 @@ import 'package:web/web.dart' as web;
 
 import 'package:cellar/src/decorators/chunked/chunked_backend.dart';
 import 'package:cellar/src/core/dispose_guard.dart';
-import 'package:cellar/src/core/storage_backend.dart';
 import 'package:cellar/src/core/materialized_file.dart';
 import 'package:cellar/src/core/object_info.dart';
 import 'package:cellar/src/core/write_options.dart';
@@ -124,7 +123,7 @@ class IndexedDbBackend extends ChunkedBackend {
 // backing — no JS runtime required for unit tests.
 // ══════════════════════════════════════════════════════════════════════════
 
-class _RawIndexedDbBackend with DisposeGuard implements StorageBackend {
+class _RawIndexedDbBackend with DisposeGuard implements SuffixListableBackend {
   _RawIndexedDbBackend({required String dbName}) : _dbName = dbName;
   final String _dbName;
   static const _storeName = 'files';
@@ -332,6 +331,47 @@ class _RawIndexedDbBackend with DisposeGuard implements StorageBackend {
     }.toJS;
 
     return completer.future;
+  }
+
+  /// The records under [prefix] whose key ends with [suffix].
+  ///
+  /// Walks the key range with a keys-only cursor, which reads no record values, and
+  /// then reads only the records that match, all in one read-only transaction.
+  /// [list] reads every record's value (a chunk record's body is up to 64 KiB, and
+  /// it is read only to be discarded), so a listing of a partition costs its whole
+  /// size; this costs the size of the matching records, which for manifests is
+  /// their metadata.
+  @override
+  Future<List<ObjectInfo>> listEndingWith(String prefix, String suffix) async {
+    final keyRange = web.IDBKeyRange.bound(prefix.toJS, '$prefix\uffff'.toJS);
+    final store = await _store('readonly');
+    final cursorRequest = store.openKeyCursor(keyRange);
+
+    final keys = <String>[];
+    final done = Completer<void>();
+    cursorRequest.onsuccess = (web.Event event) {
+      final cursor = cursorRequest.result;
+      if (cursor != null) {
+        final key = ((cursor as web.IDBCursor).key! as JSString).toDart;
+        if (key.endsWith(suffix)) keys.add(key);
+        cursor.continue_();
+      } else {
+        done.complete();
+      }
+    }.toJS;
+    cursorRequest.onerror = (web.Event event) {
+      done.completeError(
+        StateError('IndexedDB cursor failed: ${cursorRequest.error?.message}'),
+      );
+    }.toJS;
+    await done.future;
+
+    final results = <ObjectInfo>[];
+    for (final key in keys) {
+      final value = await _request(store.get(key.toJS));
+      if (value != null) results.add(_parseObjectInfo(key, value));
+    }
+    return results;
   }
 
   // ── Copy ──

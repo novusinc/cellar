@@ -7,6 +7,19 @@ import 'package:cellar/src/core/object_info.dart';
 import 'package:cellar/src/core/write_options.dart';
 import 'package:cellar/src/core/errors.dart';
 
+/// A backing that can list just the records whose key ends with a suffix, without
+/// touching the others.
+///
+/// [ChunkedBackend] lists an object by its manifest record and ignores the many
+/// chunk records beside it. A backing whose `list` has to read every record's body
+/// to answer (IndexedDB's does) implements this so a listing reads only the
+/// manifests, whose bodies are empty. A backing that lists cheaply need not.
+abstract interface class SuffixListableBackend implements StorageBackend {
+  /// The records under [prefix] whose key ends with [suffix], as `list` would
+  /// report them (keys are the stored, unchunked record keys).
+  Future<List<ObjectInfo>> listEndingWith(String prefix, String suffix);
+}
+
 /// Generic chunked storage layer.
 ///
 /// Wraps a backing [StorageBackend] (any platform — local files,
@@ -353,17 +366,22 @@ class ChunkedBackend with DisposeGuard implements StorageBackend {
   @override
   Future<List<ObjectInfo>> list(String prefix) async {
     checkNotDisposed();
-    final all = await _backing.list(prefix);
+    // Only manifest records contribute; chunks are skipped. A backing that can
+    // list by suffix hands over just the manifests, so no chunk record is read.
+    final backing = _backing;
+    final manifests = backing is SuffixListableBackend
+        ? await backing.listEndingWith(prefix, manifestSuffix)
+        : [
+            for (final info in await _backing.list(prefix))
+              if (info.key.endsWith(manifestSuffix)) info,
+          ];
     final results = <ObjectInfo>[];
-    for (final info in all) {
-      // Only manifest records contribute; chunks are skipped.
-      if (!info.key.endsWith(manifestSuffix)) continue;
+    for (final info in manifests) {
       final logicalKey = info.key.substring(
         0,
         info.key.length - manifestSuffix.length,
       );
-      final manifest = await _readManifest(logicalKey);
-      if (manifest == null) continue; // race with delete
+      final manifest = _decodeManifest(info);
       results.add(
         ObjectInfo(
           key: logicalKey,
