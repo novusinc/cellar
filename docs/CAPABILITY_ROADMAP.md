@@ -69,6 +69,7 @@ maintenance recipes see [`UPDATING.md`](UPDATING.md).
 | Capability | Status | Notes |
 |---|---|---|
 | `ChunkedBackend` (chunk + manifest over any backend) | DONE | Range reads touch only overlapping chunk records |
+| `ForwardingBackend` (public base class for decorators) | DONE | Exported from `cellar_lowlevel.dart`: forwards all 13 methods to `inner`, so a decorator overrides only what it changes; follows the ownership rule (`dispose` never disposes `inner`) and the post-dispose `StateError` contract; conformance-run over `InMemoryBackend` in both runners |
 | `EncryptedBackend` (BYO `FileEncryptor` + `EncryptionKeyResolver`) | DONE | Streaming chunks, per-chunk MACs, self-describing header, range reads decrypt only overlapping chunks, cross-key `copy` re-encrypts |
 | Compression decorator | WONT_DO | Apps that store compressible data do it in two lines (`gzip.encode` before write) and own the trade; media is already compressed (~0% gain for the main payload class); transparent compression breaks the O(range) `readRange` promise unless cellar grows a block-compression format forever; S3/GCS made the same refusal. One rule to know: compress BEFORE encrypting — ciphertext doesn't compress |
 
