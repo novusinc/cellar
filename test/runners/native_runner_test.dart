@@ -11,6 +11,7 @@ import '../batteries/chunked_battery.dart';
 import '../batteries/conformance_battery.dart';
 import '../batteries/core_battery.dart';
 import '../batteries/encrypted_battery.dart';
+import '../batteries/eviction_battery.dart';
 import '../batteries/forwarding_battery.dart';
 import '../batteries/scope_battery.dart';
 import '../batteries/stack_battery.dart';
@@ -46,5 +47,6 @@ void main() {
   runEncryptedBattery();
   runForwardingBattery();
   runCellarBattery();
+  runEvictionBattery();
   runStackBattery();
 }
