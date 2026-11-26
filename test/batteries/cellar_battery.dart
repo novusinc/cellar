@@ -3,7 +3,6 @@
 library;
 
 import '../harness/forwarding_backend.dart';
-import '../harness/in_memory_backend.dart';
 import 'dart:typed_data';
 import 'package:cellar/cellar.dart';
 import 'package:cellar/cellar_lowlevel.dart';

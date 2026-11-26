@@ -3,8 +3,6 @@ import 'dart:typed_data';
 import 'package:test/test.dart';
 import 'package:cellar/cellar_lowlevel.dart';
 
-import '../harness/in_memory_backend.dart';
-
 /// ChunkedBackend over an in-memory backing — pure, runs on every platform.
 void runChunkedBattery() {
   group('ChunkedBackend', () {

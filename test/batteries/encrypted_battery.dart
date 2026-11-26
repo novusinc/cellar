@@ -4,7 +4,6 @@ import 'package:test/test.dart';
 import 'package:cellar/cellar_lowlevel.dart';
 
 import '../harness/fake_encryptor.dart';
-import '../harness/in_memory_backend.dart';
 
 /// EncryptedBackend with the fake encryptor — pure, runs on every platform.
 void runEncryptedBattery() {

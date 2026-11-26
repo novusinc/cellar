@@ -30,6 +30,7 @@ maintenance recipes see [`UPDATING.md`](UPDATING.md).
 | 13-method interface, conformance-pinned | DONE | The conformance battery runs against every backend on the VM AND in real Chrome; a new backend's first test is one invocation per runner |
 | Raw string-prefix semantics (list / deletePrefix) | DONE | S3-style; pinned by dedicated conformance cases |
 | Typed `StorageError` family end to end | DONE | Not-found decided by existence, not exception subtype — dart:io-compatible substrates behave identically |
+| `InMemoryBackend` (volatile, conformance-clean) | DONE | Exported from `cellar_lowlevel.dart` so anyone testing code over a `StorageBackend`, or writing a decorator, has a double that passes the same battery as the shipped backends; `materialize` throws (no filesystem) |
 | Dispose guards on every backend + facade | DONE | Idempotent `dispose`; every op throws `StateError` after; creator-disposes ownership rule |
 | Internal locking | WONT_DO | Only the app knows its write topology — a lock inside the package would serialize every caller to protect the few who race, and cross-isolate/cross-process races would still escape it. The atomic-write rule keeps crash-safety regardless; serialize same-key writes at the app layer |
 | Disk-space queries | WONT_DO | A faker method: IndexedDB can't report space at all, and native answers vary by OS quota policy — the same call would mean five different things and `null` on web. The honest contract is reactive: write, and handle the typed `WriteError` (disk full / quota) |

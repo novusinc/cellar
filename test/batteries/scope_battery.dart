@@ -3,8 +3,6 @@ import 'dart:typed_data';
 import 'package:test/test.dart';
 import 'package:cellar/cellar_lowlevel.dart';
 
-import '../harness/in_memory_backend.dart';
-
 /// StorageScope key-prefixing — pure, runs on every platform.
 void runScopeBattery() {
   group('StorageScope', () {
