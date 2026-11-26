@@ -57,10 +57,14 @@ abstract interface class SuffixListableBackend implements StorageBackend {
 ///   previous generation's chunks. Without generations, an overwrite
 ///   would clobber the old chunk records in place and a mid-write
 ///   failure would serve a torn mix of old and new bytes.
-/// - Orphaned chunks from a failed write share the generation number
-///   the NEXT write of that key will use, so they're overwritten and
-///   reclaimed naturally; a failed first write is reaped by the
-///   defensive sweep in `delete`/`deletePrefix`.
+/// - A write that fails removes the chunks it wrote, at once (a full quota
+///   must not be left holding the failed attempt's data). If that cannot
+///   happen (a crash), the leftovers share the generation number the NEXT
+///   write of that key will use: it sweeps them before writing, so a shorter
+///   object does not leave their tail behind, and a delete removes the
+///   current generation and the one after it, so no record of the key
+///   outlives it. A chunk is removed by its generation's key prefix, never by
+///   the manifest's count.
 ///
 /// ## Atomicity caveats
 ///
@@ -144,25 +148,21 @@ class ChunkedBackend with DisposeGuard implements StorageBackend {
   ]) async {
     checkNotDisposed();
     final previous = await _readManifest(key);
-    // No manifest can still mean orphaned chunks from a failed first
-    // write — they'd share generation 0 with this write, and a shorter
-    // object would leave their tail behind forever. Chunks are written
-    // sequentially, so any such orphans include chunk 0: one point
-    // lookup gates the sweep instead of a prefix scan on every fresh
-    // write.
-    if (previous == null && await _backing.exists(chunkKeyFor(key, 0, 0))) {
-      await _backing.deletePrefix('$key$generationPrefix');
+    final generation = await _clearLeftovers(key, previous);
+    try {
+      final chunkCount = await _writeChunksFromBytes(key, generation, bytes);
+      await _writeManifest(
+        key,
+        generation: generation,
+        chunkCount: chunkCount,
+        totalSize: bytes.length,
+        contentType: options.contentType,
+        metadata: options.metadata,
+      );
+    } catch (_) {
+      await _reclaimFailed(key, generation);
+      rethrow;
     }
-    final generation = (previous?.generation ?? -1) + 1;
-    final chunkCount = await _writeChunksFromBytes(key, generation, bytes);
-    await _writeManifest(
-      key,
-      generation: generation,
-      chunkCount: chunkCount,
-      totalSize: bytes.length,
-      contentType: options.contentType,
-      metadata: options.metadata,
-    );
     await _deleteGeneration(key, previous);
   }
 
@@ -174,11 +174,7 @@ class ChunkedBackend with DisposeGuard implements StorageBackend {
   ]) async {
     checkNotDisposed();
     final previous = await _readManifest(key);
-    // Same failed-first-write sweep as [write].
-    if (previous == null && await _backing.exists(chunkKeyFor(key, 0, 0))) {
-      await _backing.deletePrefix('$key$generationPrefix');
-    }
-    final generation = (previous?.generation ?? -1) + 1;
+    final generation = await _clearLeftovers(key, previous);
     var index = 0;
     var totalSize = 0;
     final buffer = BytesBuilder(copy: false);
@@ -190,32 +186,37 @@ class ChunkedBackend with DisposeGuard implements StorageBackend {
       index++;
     }
 
-    await for (final chunk in byteStream) {
-      var offset = 0;
-      while (offset < chunk.length) {
-        final remaining = chunkSize - buffer.length;
-        final take = (chunk.length - offset) < remaining
-            ? chunk.length - offset
-            : remaining;
-        buffer.add(chunk.sublist(offset, offset + take));
-        offset += take;
-        totalSize += take;
-        if (buffer.length == chunkSize) await flush();
+    try {
+      await for (final chunk in byteStream) {
+        var offset = 0;
+        while (offset < chunk.length) {
+          final remaining = chunkSize - buffer.length;
+          final take = (chunk.length - offset) < remaining
+              ? chunk.length - offset
+              : remaining;
+          buffer.add(chunk.sublist(offset, offset + take));
+          offset += take;
+          totalSize += take;
+          if (buffer.length == chunkSize) await flush();
+        }
+        // Logical-bytes progress, once per source chunk. _putChunk builds
+        // its own per-record options, so the backing never double-reports.
+        options.onProgress?.call(totalSize, null);
       }
-      // Logical-bytes progress, once per source chunk. _putChunk builds
-      // its own per-record options, so the backing never double-reports.
-      options.onProgress?.call(totalSize, null);
-    }
-    await flush(); // final partial chunk (may be empty for empty input)
+      await flush(); // final partial chunk (may be empty for empty input)
 
-    await _writeManifest(
-      key,
-      generation: generation,
-      chunkCount: index,
-      totalSize: totalSize,
-      contentType: options.contentType,
-      metadata: options.metadata,
-    );
+      await _writeManifest(
+        key,
+        generation: generation,
+        chunkCount: index,
+        totalSize: totalSize,
+        contentType: options.contentType,
+        metadata: options.metadata,
+      );
+    } catch (_) {
+      await _reclaimFailed(key, generation);
+      rethrow;
+    }
     await _deleteGeneration(key, previous);
   }
 
@@ -330,26 +331,73 @@ class ChunkedBackend with DisposeGuard implements StorageBackend {
   Future<void> delete(String key) async {
     checkNotDisposed();
     final manifest = await _readManifest(key);
-    if (manifest != null) {
-      // Fast path: manifest tells us exactly which chunks exist.
-      await _deleteGeneration(key, manifest);
-    } else {
-      // Defensive sweep: no manifest, but orphaned chunks (from a failed
-      // first write) might exist under any generation.
+    if (manifest == null) {
+      // No manifest, but orphaned chunks (from a failed first write) might
+      // exist under any generation.
       await _backing.deletePrefix('$key$generationPrefix');
+      return;
     }
+    // The manifest goes first: the object is gone the moment it is deleted, and
+    // a crash after that leaves only unreferenced chunks, which nothing can read
+    // and the next write of the key sweeps. Chunks first would leave a manifest
+    // pointing at records that no longer exist.
     await _backing.delete(_manifestKey(key));
+    await _deleteGeneration(key, manifest);
+    // A write that failed before its manifest leaves chunks of the generation
+    // after the current one; delete them too, so no record of the key remains.
+    await _backing.deletePrefix(
+      _generationChunks(key, manifest.generation + 1),
+    );
   }
 
-  /// Reclaim the chunks of a superseded (or deleted) generation. Called
-  /// after the manifest swap, so a failure here can only leave orphans —
-  /// never a torn object — and the next write of the same key reuses and
-  /// overwrites the orphaned generation number anyway.
+  /// The key prefix of every chunk record of [generation] of [key].
+  String _generationChunks(String key, int generation) =>
+      '$key$generationPrefix$generation$chunkPrefix';
+
+  /// The generation a new write of [key] will use, after removing what an earlier
+  /// attempt at it left behind.
+  ///
+  /// A write puts its chunks under a new generation number and swaps the manifest
+  /// last, so one that fails part-way leaves chunks nothing references. They
+  /// carry the number the next attempt will use, so the next attempt overwrites
+  /// them, but a shorter object would leave the tail of the failed one behind
+  /// for good. Chunks are written in order from 0, so a leftover generation
+  /// includes chunk 0, and one point lookup gates the sweep.
+  ///
+  /// With no manifest at all the object has never been written (or was deleted),
+  /// and every generation of the key is swept, as a deletion does.
+  Future<int> _clearLeftovers(String key, ChunkedManifest? previous) async {
+    if (previous == null) {
+      if (await _backing.exists(chunkKeyFor(key, 0, 0))) {
+        await _backing.deletePrefix('$key$generationPrefix');
+      }
+      return 0;
+    }
+    final generation = previous.generation + 1;
+    if (await _backing.exists(chunkKeyFor(key, generation, 0))) {
+      await _backing.deletePrefix(_generationChunks(key, generation));
+    }
+    return generation;
+  }
+
+  /// Best-effort removal of the chunks a write wrote before it failed, so a failure
+  /// (a full quota, above all) does not leave its partial data taking more room.
+  /// Whatever it cannot remove is swept by the next write or delete of the key.
+  Future<void> _reclaimFailed(String key, int generation) async {
+    try {
+      await _backing.deletePrefix(_generationChunks(key, generation));
+    } catch (_) {
+      // The original failure is the one to report.
+    }
+  }
+
+  /// Reclaim every chunk record of a superseded (or deleted) generation, by
+  /// prefix and not by the manifest's count, so chunks beyond it (left by a
+  /// failed attempt at the same generation) go too. Called after the manifest
+  /// swap, so a failure here can only leave orphans, never a torn object.
   Future<void> _deleteGeneration(String key, ChunkedManifest? manifest) async {
     if (manifest == null) return;
-    for (var i = 0; i < manifest.chunkCount; i++) {
-      await _backing.delete(chunkKeyFor(key, manifest.generation, i));
-    }
+    await _backing.deletePrefix(_generationChunks(key, manifest.generation));
   }
 
   @override
@@ -406,19 +454,24 @@ class ChunkedBackend with DisposeGuard implements StorageBackend {
     if (manifest == null) throw FileNotFoundError(sourceKey);
 
     final destPrevious = await _readManifest(destKey);
-    final destGeneration = (destPrevious?.generation ?? -1) + 1;
-    for (var i = 0; i < manifest.chunkCount; i++) {
-      final chunk = await _readChunk(sourceKey, manifest.generation, i);
-      await _putChunk(destKey, destGeneration, i, chunk);
+    final destGeneration = await _clearLeftovers(destKey, destPrevious);
+    try {
+      for (var i = 0; i < manifest.chunkCount; i++) {
+        final chunk = await _readChunk(sourceKey, manifest.generation, i);
+        await _putChunk(destKey, destGeneration, i, chunk);
+      }
+      await _writeManifest(
+        destKey,
+        generation: destGeneration,
+        chunkCount: manifest.chunkCount,
+        totalSize: manifest.totalSize,
+        contentType: manifest.contentType,
+        metadata: manifest.metadata,
+      );
+    } catch (_) {
+      await _reclaimFailed(destKey, destGeneration);
+      rethrow;
     }
-    await _writeManifest(
-      destKey,
-      generation: destGeneration,
-      chunkCount: manifest.chunkCount,
-      totalSize: manifest.totalSize,
-      contentType: manifest.contentType,
-      metadata: manifest.metadata,
-    );
     await _deleteGeneration(destKey, destPrevious);
   }
 
