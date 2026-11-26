@@ -79,6 +79,16 @@ export 'src/decorators/access/access_tracking_backend.dart'
     show AccessTrackingBackend;
 export 'src/decorators/forwarding/forwarding_backend.dart'
     show ForwardingBackend;
+export 'src/decorators/hooks/hooked_backend.dart' show HookedBackend;
+export 'src/decorators/hooks/storage_hooks.dart'
+    show
+        AfterDeleteHook,
+        AfterReadHook,
+        AfterWriteHook,
+        BeforeDeleteHook,
+        BeforeWriteHook,
+        HookErrorCallback,
+        StorageHooks;
 export 'src/decorators/verifying/content_digester.dart'
     show ContentDigester, ContentDigestSession;
 export 'src/decorators/verifying/verifying_backend.dart'

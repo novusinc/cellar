@@ -15,6 +15,7 @@ import '../batteries/core_battery.dart';
 import '../batteries/encrypted_battery.dart';
 import '../batteries/eviction_battery.dart';
 import '../batteries/forwarding_battery.dart';
+import '../batteries/hooks_battery.dart';
 import '../batteries/metadata_keys_battery.dart';
 import '../batteries/reserved_prefix_battery.dart';
 import '../batteries/scope_battery.dart';
@@ -60,6 +61,14 @@ void main() {
   // ── AccessTrackingBackend over each stack the runner can host ──
   runAccessTrackingBattery('InMemoryBackend', create: InMemoryBackend.new);
   runAccessTrackingBattery(
+    'ChunkedBackend over InMemory',
+    create: () =>
+        ChunkedBackend(backing: InMemoryBackend(), chunkSize: 64 * 1024),
+  );
+
+  // ── HookedBackend over each stack the runner can host ──
+  runHooksBattery('InMemoryBackend', create: InMemoryBackend.new);
+  runHooksBattery(
     'ChunkedBackend over InMemory',
     create: () =>
         ChunkedBackend(backing: InMemoryBackend(), chunkSize: 64 * 1024),
