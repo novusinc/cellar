@@ -97,6 +97,12 @@ enum EvictionReason {
 
   /// The partition was over its `maxBytes`.
   partitionCap,
+
+  /// The partitions of a `ByteBudget` were together over its `maxBytes`.
+  budget,
+
+  /// `Cellar.makeRoom` freed space on request.
+  makeRoom,
 }
 
 /// Decides whether an object may be evicted at all. Return false to keep it, for

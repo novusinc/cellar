@@ -10,6 +10,7 @@ library;
 import 'package:test/test.dart';
 
 import '../batteries/cellar_battery.dart';
+import '../batteries/budget_battery.dart';
 import '../batteries/chunked_battery.dart';
 import '../batteries/conformance_battery.dart';
 import '../batteries/core_battery.dart';
@@ -52,6 +53,7 @@ void main() {
   runForwardingBattery();
   runCellarBattery();
   runEvictionBattery();
+  runBudgetBattery();
   runStackBattery();
 
   // ── Browser-only: the substrate a VM cannot host ──

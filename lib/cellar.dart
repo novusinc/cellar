@@ -59,6 +59,7 @@
 library;
 
 // ── The class ──────────────────────────────────────────────────────
+export 'src/cellar/byte_budget.dart' show ByteBudget;
 export 'src/cellar/cellar.dart' show Cellar;
 export 'src/cellar/cellar_encryption.dart' show CellarEncryption;
 export 'src/cellar/lifecycle.dart' show Lifecycle;
