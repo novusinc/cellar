@@ -9,6 +9,7 @@ import 'package:cellar/src/core/storage_backend.dart';
 import 'package:cellar/src/core/dispose_guard.dart';
 import 'package:cellar/src/core/errors.dart';
 import 'package:cellar/src/core/materialized_file.dart';
+import 'package:cellar/src/core/importable_backend.dart';
 import 'package:cellar/src/core/metadata_patchable.dart';
 import 'package:cellar/src/core/movable_backend.dart';
 import 'package:cellar/src/core/object_info.dart';
@@ -45,7 +46,7 @@ import 'package:cellar/src/core/write_options.dart';
 /// there's no async setup step in the constructor.
 class FileSystemBackend
     with DisposeGuard
-    implements MetadataPatchableBackend, MovableBackend {
+    implements MetadataPatchableBackend, MovableBackend, ImportableBackend {
   /// Create a backend rooted at `baseDir`.
   ///
   /// [osBackup] (default `true`) controls whether the directory
@@ -516,22 +517,39 @@ class FileSystemBackend
       throw FileNotFoundError(sourceKey);
     }
     if (sourceKey == destKey) return;
-    final dest = _file(destKey);
-    await dest.parent.create(recursive: true);
 
     final meta = await _readMeta(sourceKey, stat);
     final contentType = meta?['contentType'];
-    final metadata = _castMetadata(meta?['metadata']);
+    await _renameIn(
+      source,
+      stat,
+      destKey,
+      contentType is String ? contentType : null,
+      _castMetadata(meta?['metadata']),
+    );
+    await _os.deleteFile(_metaFile(sourceKey));
+  }
+
+  /// Rename [source], a file whose `stat` is [stat], over [destKey], with its
+  /// sidecar: the destination's sidecar is written first as a temp that records the
+  /// body's identity (a rename keeps size and modification time), then the body is
+  /// renamed, then the sidecar. A failure before the body moves discards the temp
+  /// and leaves everything as it was; after it, the temp is kept for
+  /// [recoverInterruptedWrites].
+  Future<void> _renameIn(
+    File source,
+    FileStat stat,
+    String destKey,
+    String? contentType,
+    Map<String, String> metadata,
+  ) async {
+    final dest = _file(destKey);
+    await dest.parent.create(recursive: true);
     File? tempMeta;
-    if (_hasMetadata(contentType is String ? contentType : null, metadata)) {
+    if (_hasMetadata(contentType, metadata)) {
       tempMeta = File(_writeTempPath(_metaFile(destKey).path));
       try {
-        await _writeSidecar(
-          tempMeta,
-          contentType is String ? contentType : null,
-          metadata,
-          stat,
-        );
+        await _writeSidecar(tempMeta, contentType, metadata, stat);
       } catch (_) {
         await _discardTemp(tempMeta);
         rethrow;
@@ -549,7 +567,65 @@ class FileSystemBackend
     } else {
       await _os.deleteFile(_metaFile(destKey));
     }
-    await _os.deleteFile(_metaFile(sourceKey));
+  }
+
+  // ── Import ──
+
+  /// Store the file at [path] under [key]; see [ImportableBackend.importFile].
+  ///
+  /// With `move: true` the file is renamed into place (so no bytes are copied)
+  /// when the rename is possible, which is when it is on the same volume; when the
+  /// OS refuses (a different volume), it is copied in atomically, as `copy` does, and
+  /// the source is deleted only after the object exists.
+  @override
+  Future<void> importFile(
+    String key,
+    String path, {
+    bool move = false,
+    WriteOptions options = const WriteOptions(),
+  }) async {
+    checkNotDisposed();
+    await _ensureBackupAttribute();
+    final source = File(path);
+    final stat = await source.stat();
+    if (stat.type != FileSystemEntityType.file) throw FileNotFoundError(path);
+    final dest = _file(key);
+    if (await dest.exists() &&
+        await FileSystemEntity.identical(source.path, dest.path)) {
+      throw ArgumentError.value(
+        path,
+        'path',
+        'is the file already stored at "$key"',
+      );
+    }
+
+    if (move) {
+      try {
+        await _renameIn(
+          source,
+          stat,
+          key,
+          options.contentType,
+          options.metadata,
+        );
+        return;
+      } on FileSystemException {
+        // The rename was refused (another volume): fall through to a copy. The
+        // source is intact, since a refused rename moves nothing.
+      }
+    }
+    await dest.parent.create(recursive: true);
+    await _commit(
+      key,
+      (temp) async {
+        await source.copy(temp.path);
+        await _flushToDisk(temp);
+      },
+      contentType: options.contentType,
+      metadata: options.metadata,
+    );
+    // Delete the source only now that the object exists.
+    if (move) await _os.deleteFile(source);
   }
 
   // ── Metadata update ──
