@@ -71,6 +71,8 @@ export 'src/decorators/encrypted/encryption_key_resolver.dart'
 export 'src/decorators/encrypted/encrypted_backend.dart' show EncryptedBackend;
 export 'src/decorators/chunked/chunked_backend.dart'
     show ChunkedBackend, ChunkedManifest;
+export 'src/decorators/forwarding/forwarding_backend.dart'
+    show ForwardingBackend;
 
 // Key scoping — Cellar uses one StorageScope per partition, but you
 // can wire your own.

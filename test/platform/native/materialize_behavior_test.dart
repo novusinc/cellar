@@ -19,8 +19,6 @@ import 'dart:typed_data';
 import 'package:cellar/cellar_lowlevel.dart';
 import 'package:test/test.dart';
 
-import '../../harness/forwarding_backend.dart';
-
 // ══════════════════════════════════════════════════════════════════════════
 // Helpers
 // ══════════════════════════════════════════════════════════════════════════
