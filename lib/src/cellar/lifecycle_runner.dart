@@ -124,11 +124,16 @@ class LifecycleRunner {
     }
   }
 
-  /// Run evaluation immediately for every registered partition. Useful
-  /// for tests; production code lets the timer fire it. Waits for the passes
-  /// writes started first, so the two never run over each other.
-  Future<void> evaluateNow() async {
+  /// Run evaluation immediately: every registered partition and every budget, or,
+  /// with [partition], only that partition's own rules. Waits for the passes writes
+  /// started first, so the two never run over each other.
+  Future<void> evaluateNow({String? partition}) async {
     await idle();
+    if (partition != null) {
+      final only = _partitions[partition];
+      if (only != null) await only.serial.run(() => _evaluate(only));
+      return;
+    }
     for (final p in _partitions.values) {
       await p.serial.run(() => _evaluate(p));
     }

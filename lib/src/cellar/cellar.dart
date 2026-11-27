@@ -671,7 +671,7 @@ class Cellar {
   }
 
   // ══════════════════════════════════════════════════════════════════════
-  // TEST HOOKS
+  // THE LIFECYCLE BY HAND
   // ══════════════════════════════════════════════════════════════════════
 
   /// Wait until the eviction passes that writes started have finished.
@@ -686,11 +686,28 @@ class Cellar {
     await _lifecycleRunner?.idle();
   }
 
-  /// Run lifecycle eviction for every partition immediately instead of
-  /// waiting for the next timer tick — e.g. after a bulk import that
-  /// blew past a cache cap. No-op when no partition has rules.
-  Future<void> runLifecycleNow() async {
-    await _lifecycleRunner?.evaluateNow();
+  /// Run the lifecycle rules now, instead of waiting for the timer: expire what is
+  /// past `maxAge`, and evict down to each partition's `maxBytes` and each budget's
+  /// cap. It is the timer's own pass (the same order, `canEvict`, `evictionGuard` and
+  /// `onEvicted`), so an object the application keeps stays.
+  ///
+  /// For a screen that has just written a lot, a "clear the cache" action, a low
+  /// storage warning, a test. It first waits for the passes that writes started, so
+  /// the two never run over each other.
+  ///
+  /// With [partition], only that partition's own rules run: budgets it belongs to are
+  /// left alone, since a budget is a rule about several partitions. A partition with
+  /// no rules has nothing to run. Throws [ArgumentError] for a name that is not a
+  /// partition. No-op when nothing has rules, or before [open].
+  Future<void> runLifecycleNow({String? partition}) async {
+    if (partition != null && !_partitions.containsKey(partition)) {
+      throw ArgumentError.value(
+        partition,
+        'partition',
+        'unknown partition; configured: ${_partitions.keys.join(", ")}',
+      );
+    }
+    await _lifecycleRunner?.evaluateNow(partition: partition);
   }
 
   // ══════════════════════════════════════════════════════════════════════

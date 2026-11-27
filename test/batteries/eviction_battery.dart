@@ -566,6 +566,103 @@ void runEvictionBattery() {
       );
     });
 
+    group('run by hand', () {
+      late InMemoryBackend a;
+      late InMemoryBackend b;
+
+      setUp(() {
+        a = InMemoryBackend();
+        b = InMemoryBackend();
+      });
+
+      /// Two partitions, each over a 20-byte cap with three 10-byte objects, written
+      /// oldest first; [budget] adds a cap of 25 over both and removes their own.
+      Future<Cellar> openTwo({bool budget = false}) async {
+        final cap = Lifecycle.cache(maxBytes: 20);
+        final cellar = Cellar.withBackends(
+          {'a': a, 'b': b},
+          defaultPartition: 'a',
+          lifecycles: budget ? const {} : {'a': cap, 'b': cap},
+          budgets: budget
+              ? const {
+                  'both': ByteBudget(maxBytes: 25, partitions: {'a', 'b'}),
+                }
+              : null,
+        );
+        await cellar.open();
+        for (final entry in {'a': a, 'b': b}.entries) {
+          for (var i = 0; i < 3; i++) {
+            await cellar.write('k$i', sized(10), partition: entry.key);
+            entry.value.setLastModified(
+              'k$i',
+              DateTime.utc(2020, 1, 1, 0, 0, i),
+            );
+          }
+        }
+        return cellar;
+      }
+
+      Future<int> count(Cellar cellar, String partition) async =>
+          (await cellar.list('', partition: partition)).length;
+
+      test(
+        'with no partition it runs every partition, as it always did',
+        () async {
+          final cellar = await openTwo();
+
+          await cellar.runLifecycleNow();
+
+          expect(await count(cellar, 'a'), 2);
+          expect(await count(cellar, 'b'), 2);
+          await cellar.close();
+        },
+      );
+
+      test('with a partition it runs that partition and leaves the others over '
+          'their caps', () async {
+        final cellar = await openTwo();
+
+        await cellar.runLifecycleNow(partition: 'a');
+
+        expect(await count(cellar, 'a'), 2, reason: 'brought under its cap');
+        expect(await count(cellar, 'b'), 3, reason: 'not asked');
+        await cellar.close();
+      });
+
+      test('with a partition it does not run a budget the partition belongs '
+          'to', () async {
+        final cellar = await openTwo(budget: true);
+
+        await cellar.runLifecycleNow(partition: 'a');
+        expect(
+          await count(cellar, 'a') + await count(cellar, 'b'),
+          6,
+          reason: 'a budget is a rule about several partitions',
+        );
+
+        await cellar.runLifecycleNow();
+        expect(await count(cellar, 'a') + await count(cellar, 'b'), 2);
+        await cellar.close();
+      });
+
+      test('a name that is not a partition is refused, and a partition with no '
+          'rules has nothing to run', () async {
+        final cellar = Cellar.withBackends(
+          {'a': a, 'b': b},
+          defaultPartition: 'a',
+          lifecycles: {'a': const Lifecycle.cache(maxBytes: 20)},
+        );
+        await cellar.open();
+
+        await expectLater(
+          cellar.runLifecycleNow(partition: 'nope'),
+          throwsArgumentError,
+        );
+        await cellar.runLifecycleNow(partition: 'b'); // no rules: no error
+        await cellar.close();
+      });
+    });
+
     test('the defaults are what cellar always did', () {
       const lifecycle = Lifecycle.cache(maxBytes: 1);
       expect(lifecycle.evictionPolicy, same(EvictionPolicy.oldestWritten));
