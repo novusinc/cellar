@@ -65,6 +65,11 @@ export 'src/backends/file_system/file_system_backend.dart'
 export 'src/backends/indexed_db/indexed_db_backend.dart' show IndexedDbBackend;
 export 'src/backends/in_memory/in_memory_backend.dart' show InMemoryBackend;
 
+// Bytes-only storage, the data half of a store whose metadata lives in a database.
+export 'src/data/data_entry.dart' show DataEntry;
+export 'src/data/data_store.dart' show DataStore;
+export 'src/data/file_data_store.dart' show FileDataStore;
+
 // Bring-your-own-crypto interfaces — implement these to plug encryption into
 // EncryptedBackend (cipher_kit, or any crypto lib, provides implementations).
 export 'src/decorators/encrypted/file_encryptor.dart' show FileEncryptor;
