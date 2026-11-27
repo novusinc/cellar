@@ -1,4 +1,4 @@
-/// `ByteBudget` and `Cellar.makeRoom` — pure, runs on every platform.
+/// `ByteBudget` and `Cellar.freeBytes` — pure, runs on every platform.
 library;
 
 import 'dart:typed_data';
@@ -279,7 +279,7 @@ void runBudgetBattery() {
       );
     });
 
-    group('makeRoom', () {
+    group('freeBytes', () {
       test(
         'frees at least the bytes asked for, in policy order, and stops',
         () async {
@@ -287,7 +287,7 @@ void runBudgetBattery() {
           await seed(cellar, files, 'files', {'f1': 1, 'f2': 4});
           await seed(cellar, avatars, 'avatars', {'a1': 2, 'a2': 3});
 
-          final freed = await cellar.makeRoom(15);
+          final freed = await cellar.freeBytes(15);
 
           // 10 is not enough; 20 is (two objects), and it stops there.
           expect(freed, 20);
@@ -303,7 +303,7 @@ void runBudgetBattery() {
         );
         await seed(cellar, files, 'files', {'f1': 1, 'f2': 2});
 
-        expect(await cellar.makeRoom(10), 10);
+        expect(await cellar.freeBytes(10), 10);
         expect(await keys(cellar, 'files'), {'f2'});
         await cellar.close();
       });
@@ -319,7 +319,7 @@ void runBudgetBattery() {
           await seed(cellar, files, 'files', {'pinned': 1, 'f2': 2});
           await seed(cellar, avatars, 'avatars', {'a1': 3});
 
-          final freed = await cellar.makeRoom(100);
+          final freed = await cellar.freeBytes(100);
 
           expect(freed, 20);
           expect(await keys(cellar, 'files'), {'pinned'});
@@ -327,7 +327,7 @@ void runBudgetBattery() {
         },
       );
 
-      test('tells onEvicted makeRoom', () async {
+      test('tells onEvicted freeBytes', () async {
         final told = <EvictionReason>[];
         final cellar = await open(
           lifecycles: {
@@ -336,17 +336,17 @@ void runBudgetBattery() {
         );
         await seed(cellar, files, 'files', {'f1': 1});
 
-        await cellar.makeRoom(5);
+        await cellar.freeBytes(5);
 
-        expect(told, [EvictionReason.makeRoom]);
+        expect(told, [EvictionReason.freeBytes]);
         await cellar.close();
       });
 
       test('nothing to free, or nothing asked, is 0', () async {
         final cellar = await open();
-        expect(await cellar.makeRoom(10), 0);
+        expect(await cellar.freeBytes(10), 0);
         await seed(cellar, files, 'files', {'f1': 1});
-        expect(await cellar.makeRoom(0), 0);
+        expect(await cellar.freeBytes(0), 0);
         expect(await keys(cellar, 'files'), {'f1'});
         await cellar.close();
       });
@@ -365,24 +365,24 @@ void runBudgetBattery() {
         await cellar.write('f1', Uint8List(10));
         await cellar.write('a1', Uint8List(10), partition: 'avatars');
 
-        await expectLater(cellar.makeRoom(5), throwsArgumentError);
+        await expectLater(cellar.freeBytes(5), throwsArgumentError);
         await expectLater(
-          cellar.makeRoom(5, budget: 'nope'),
+          cellar.freeBytes(5, budget: 'nope'),
           throwsArgumentError,
         );
-        expect(await cellar.makeRoom(5, budget: 'two'), 10);
+        expect(await cellar.freeBytes(5, budget: 'two'), 10);
         expect(await cellar.exists('f1'), isTrue);
         expect(await cellar.exists('a1', partition: 'avatars'), isFalse);
         await cellar.close();
       });
 
-      test('a cellar with no budget has nothing to make room in', () async {
+      test('a cellar with no budget has nothing to free bytes from', () async {
         final cellar = Cellar.withBackends({
           'files': files,
         }, defaultPartition: 'files');
         await cellar.open();
 
-        await expectLater(cellar.makeRoom(5), throwsStateError);
+        await expectLater(cellar.freeBytes(5), throwsStateError);
         await cellar.close();
       });
     });

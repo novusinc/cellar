@@ -186,7 +186,7 @@ class WriteError extends StorageError {
 /// A write failed because storage is full: the browser's quota for the origin.
 ///
 /// A [WriteError], so existing handlers still match. It is the one write failure a
-/// caller can do something about: free space (evict, or `Cellar.makeRoom`) and try
+/// caller can do something about: free space (evict, or `Cellar.freeBytes`) and try
 /// again. Nothing of the failed write is left readable; the key holds whatever it
 /// held before.
 class QuotaExceededError extends WriteError {

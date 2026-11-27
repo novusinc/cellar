@@ -47,7 +47,7 @@ class ByteBudget {
   final Set<String> partitions;
 
   /// The order in which objects are evicted across the members when the total is
-  /// over [maxBytes], and when `Cellar.makeRoom` frees space. Default
+  /// over [maxBytes], and when `Cellar.freeBytes` frees space. Default
   /// [EvictionPolicy.oldestWritten].
   final EvictionPolicy evictionPolicy;
 

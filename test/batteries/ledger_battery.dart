@@ -750,7 +750,7 @@ void runLedgerBattery() {
       });
 
       test(
-        'makeRoom frees what was asked from the ledgers, with no listing',
+        'freeBytes frees what was asked from the ledgers, with no listing',
         () async {
           final cellar = await openBudget();
           await cellar.settle();
@@ -761,7 +761,7 @@ void runLedgerBattery() {
           await cellar.settle();
           final listed = aCounting.lists + bCounting.lists;
 
-          final freed = await cellar.makeRoom(15);
+          final freed = await cellar.freeBytes(15);
 
           expect(freed, 20, reason: 'whole objects: two of ten bytes');
           expect(aCounting.lists + bCounting.lists, listed);
