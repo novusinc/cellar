@@ -144,7 +144,7 @@ class LifecycleRunner {
   /// This is not "get under the cap": it frees [bytes] whether or not the budget is
   /// full, for a caller whose write failed because the device or browser ran out of
   /// room that the budget does not know about.
-  Future<int> makeRoom(String name, int bytes) async {
+  Future<int> freeBytes(String name, int bytes) async {
     final budget = _budgets[name];
     if (budget == null) {
       throw ArgumentError.value(name, 'budget', 'unknown budget');
@@ -153,7 +153,7 @@ class LifecycleRunner {
     var freed = 0;
     for (final victim in await _budgetVictims(budget)) {
       if (freed >= bytes) break;
-      if (await _evictTracked(victim.$1, victim.$2, EvictionReason.makeRoom)) {
+      if (await _evictTracked(victim.$1, victim.$2, EvictionReason.freeBytes)) {
         freed += victim.$2.size;
       }
     }

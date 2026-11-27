@@ -645,10 +645,12 @@ class Cellar {
   /// [budget] names the budget; it may be omitted when there is exactly one.
   /// Throws [StateError] when the cellar has no budget, and [ArgumentError] when
   /// [budget] is unknown or omitted among several.
-  Future<int> makeRoom(int bytes, {String? budget}) async {
+  Future<int> freeBytes(int bytes, {String? budget}) async {
     _assertOpen();
     if (_budgets.isEmpty) {
-      throw StateError('makeRoom needs a ByteBudget, and this Cellar has none');
+      throw StateError(
+        'freeBytes needs a ByteBudget, and this Cellar has none',
+      );
     }
     final name = budget ?? (_budgets.length == 1 ? _budgets.keys.single : null);
     if (name == null) {
@@ -665,7 +667,7 @@ class Cellar {
         'unknown budget; configured: ${_budgets.keys.join(", ")}',
       );
     }
-    return _lifecycleRunner!.makeRoom(name, bytes);
+    return _lifecycleRunner!.freeBytes(name, bytes);
   }
 
   // ══════════════════════════════════════════════════════════════════════
