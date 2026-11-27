@@ -663,6 +663,188 @@ void runEvictionBattery() {
       });
     });
 
+    group('shrinkTo', () {
+      test('evicts in the partition\'s own policy until it fits, and says how '
+          'much it freed', () async {
+        final backing = InMemoryBackend();
+        final cellar = await open(
+          backing,
+          const Lifecycle(evictionPolicy: EvictionPolicy.leastRecentlyUsed),
+        );
+        // Written a to e; read c, then a, then d; b and e never read.
+        await seed(
+          cellar,
+          backing,
+          ['a', 'b', 'c', 'd', 'e'],
+          metadata: {
+            'a': {accessedAtMetadataKey: at(2)},
+            'c': {accessedAtMetadataKey: at(1)},
+            'd': {accessedAtMetadataKey: at(3)},
+          },
+        );
+
+        final freed = await cellar.shrinkTo(20);
+
+        expect(freed, 30);
+        // Least recently used first: b, e (never read, so by write), then c.
+        expect(await survivors(cellar), {'a', 'd'});
+        await cellar.close();
+      });
+
+      test('is a one-off: the configured cap is not changed', () async {
+        final backing = InMemoryBackend();
+        final cellar = await open(backing, const Lifecycle(maxBytes: 100));
+        await seed(cellar, backing, ['a', 'b', 'c', 'd', 'e']);
+
+        await cellar.shrinkTo(10);
+        expect(await survivors(cellar), {'e'});
+
+        await seed(cellar, backing, ['f', 'g', 'h']);
+        await cellar.runLifecycleNow();
+        expect(await survivors(cellar), {
+          'e',
+          'f',
+          'g',
+          'h',
+        }, reason: 'cap 100');
+        await cellar.close();
+      });
+
+      test('keeps what canEvict keeps, and frees less', () async {
+        final backing = InMemoryBackend();
+        final cellar = await open(
+          backing,
+          Lifecycle(canEvict: (info) => info.key != 'a'),
+        );
+        await seed(cellar, backing, ['a', 'b', 'c']);
+
+        final freed = await cellar.shrinkTo(0);
+
+        expect(freed, 20, reason: 'a is kept');
+        expect(await survivors(cellar), {'a'});
+        await cellar.close();
+      });
+
+      test(
+        'goes through the eviction guard and tells onEvicted shrinkTo',
+        () async {
+          final backing = InMemoryBackend();
+          final told = <EvictionReason>[];
+          final cellar = await open(
+            backing,
+            Lifecycle(
+              evictionGuard: (info, action) async {
+                if (info.key != 'b') await action.evict();
+              },
+              onEvicted: (partition, info, reason) => told.add(reason),
+            ),
+          );
+          await seed(cellar, backing, ['a', 'b', 'c']);
+
+          await cellar.shrinkTo(0);
+
+          expect(await survivors(cellar), {
+            'b',
+          }, reason: 'the guard declined b');
+          expect(told, [EvictionReason.shrinkTo, EvictionReason.shrinkTo]);
+          await cellar.close();
+        },
+      );
+
+      test(
+        'a target at or over the size frees nothing, and zero frees all that '
+        'may go',
+        () async {
+          final backing = InMemoryBackend();
+          final cellar = await open(backing, const Lifecycle());
+          await seed(cellar, backing, ['a', 'b', 'c']);
+
+          expect(await cellar.shrinkTo(30), 0);
+          expect(await cellar.shrinkTo(99), 0);
+          expect(await survivors(cellar), {'a', 'b', 'c'});
+
+          expect(await cellar.shrinkTo(0), 30);
+          expect(await survivors(cellar), isEmpty);
+          await cellar.close();
+        },
+      );
+
+      test('reduces the named partition and no other, and the default one when '
+          'none is named', () async {
+        final a = InMemoryBackend();
+        final b = InMemoryBackend();
+        final cellar = Cellar.withBackends(
+          {'a': a, 'b': b},
+          defaultPartition: 'a',
+          lifecycles: {'a': const Lifecycle(), 'b': const Lifecycle()},
+        );
+        await cellar.open();
+        for (final partition in ['a', 'b']) {
+          for (final key in ['x', 'y', 'z']) {
+            await cellar.write(key, sized(10), partition: partition);
+          }
+        }
+
+        await cellar.shrinkTo(10, partition: 'b');
+        expect((await cellar.list('', partition: 'b')).length, 1);
+        expect((await cellar.list('', partition: 'a')).length, 3);
+
+        await cellar.shrinkTo(20); // no partition: the default, a
+        expect((await cellar.list('', partition: 'a')).length, 2);
+        expect((await cellar.list('', partition: 'b')).length, 1);
+        await cellar.close();
+      });
+
+      test(
+        'a partition with a policy and no cap can be shrunk by hand',
+        () async {
+          final backing = InMemoryBackend();
+          final cellar = await open(
+            backing,
+            const Lifecycle(evictionPolicy: EvictionPolicy.leastRecentlyUsed),
+          );
+          await seed(cellar, backing, ['a', 'b', 'c']);
+          await cellar.runLifecycleNow(); // no rules to run: nothing goes
+          expect(await survivors(cellar), {'a', 'b', 'c'});
+
+          await cellar.shrinkTo(10);
+
+          expect(await survivors(cellar), {'c'});
+          await cellar.close();
+        },
+      );
+
+      test('a partition with no lifecycle is permanent: refused, and nothing '
+          'is lost', () async {
+        final a = InMemoryBackend();
+        final b = InMemoryBackend();
+        final cellar = Cellar.withBackends(
+          {'a': a, 'b': b},
+          defaultPartition: 'a',
+          lifecycles: {'a': const Lifecycle(maxBytes: 100)},
+        );
+        await cellar.open();
+        await cellar.write('keep', sized(10), partition: 'b');
+
+        await expectLater(cellar.shrinkTo(0, partition: 'b'), throwsStateError);
+
+        expect(await cellar.exists('keep', partition: 'b'), isTrue);
+        await cellar.close();
+      });
+
+      test('a negative target and an unknown partition are refused', () async {
+        final backing = InMemoryBackend();
+        final cellar = await open(backing, const Lifecycle());
+
+        await expectLater(cellar.shrinkTo(-1), throwsArgumentError);
+        await expectLater(
+          cellar.shrinkTo(0, partition: 'nope'),
+          throwsArgumentError,
+        );
+        await cellar.close();
+      });
+    });
+
     test('the defaults are what cellar always did', () {
       const lifecycle = Lifecycle.cache(maxBytes: 1);
       expect(lifecycle.evictionPolicy, same(EvictionPolicy.oldestWritten));

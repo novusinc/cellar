@@ -165,6 +165,36 @@ class LifecycleRunner {
     return freed;
   }
 
+  /// Reduce the partition [name] to at most [maxBytes], evicting in that partition's
+  /// own policy order and through its `canEvict`, `evictionGuard` and `onEvicted`;
+  /// returns the bytes freed, which falls short of what the target needs when what is
+  /// left is kept. A pass of its own, run after any other pass of the partition.
+  Future<int> shrinkTo(String name, int maxBytes) async {
+    final p = _partitions[name];
+    if (p == null) {
+      throw StateError('partition "$name" has no lifecycle to shrink it by');
+    }
+    return p.serial.run(() async {
+      final objects = await _objectsOf(p);
+      final total = objects.fold<int>(0, (a, o) => a + o.size);
+      if (total <= maxBytes) return 0;
+      final policy = p.lifecycle.evictionPolicy;
+      final ordered = [...objects]
+        ..sort((a, b) {
+          final byPolicy = policy.compare(a, b);
+          return byPolicy != 0 ? byPolicy : a.key.compareTo(b.key);
+        });
+      var freed = 0;
+      for (final victim in ordered) {
+        if (_disposed || total - freed <= maxBytes) break;
+        if (await _evictTracked(p, victim, EvictionReason.shrinkTo)) {
+          freed += victim.size;
+        }
+      }
+      return freed;
+    });
+  }
+
   /// Run wipeOnOpen across all partitions whose lifecycle requests it.
   /// Called by `Cellar.open` before any user calls happen.
   Future<void> runWipeOnOpen() async {
@@ -507,6 +537,9 @@ class LifecycleRunner {
     }
     return evicted;
   }
+
+  /// Whether any partition is registered with the runner.
+  bool get hasPartitions => _partitions.isNotEmpty;
 
   /// The currently-active timer interval, for diagnostics. Null if no
   /// partition has rules.

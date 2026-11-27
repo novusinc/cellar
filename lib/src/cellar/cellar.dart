@@ -348,7 +348,9 @@ class Cellar {
 
     _rawBackends = rawBackends;
     _scopes = scopes;
-    _lifecycleRunner = runner.currentInterval == null ? null : runner;
+    // Kept for any partition with a lifecycle, even one with no rules to run on a
+    // timer: such a partition is still one that [shrinkTo] and [runLifecycleNow] act on.
+    _lifecycleRunner = runner.hasPartitions ? runner : null;
     _opened = true;
   }
 
@@ -708,6 +710,44 @@ class Cellar {
       );
     }
     await _lifecycleRunner?.evaluateNow(partition: partition);
+  }
+
+  /// Reduce [partition] (the default one when omitted) to at most [maxBytes] now,
+  /// evicting in that partition's own `evictionPolicy`, and through its `canEvict`,
+  /// `evictionGuard` and `onEvicted` (told `EvictionReason.shrinkTo`). Returns the bytes
+  /// freed: less than the target needs when what is left is kept, and 0 when the
+  /// partition already fits.
+  ///
+  /// A one-off: the partition's configured `maxBytes` does not change. It is for a
+  /// "free up space" action, a low-storage warning, or trimming a partition that has
+  /// a policy but no cap of its own. It reduces one partition and never the whole
+  /// cellar: partitions have different policies, and there is no order across them.
+  ///
+  /// A partition with no lifecycle is permanent data and is never evicted: asking
+  /// throws [StateError]. A negative [maxBytes] or a name that is not a partition
+  /// throws [ArgumentError].
+  Future<int> shrinkTo(int maxBytes, {String? partition}) async {
+    _assertOpen();
+    if (maxBytes < 0) {
+      throw ArgumentError.value(maxBytes, 'maxBytes', 'must not be negative');
+    }
+    final name = partition ?? _defaultPartition;
+    final config = _partitions[name];
+    if (config == null) {
+      throw ArgumentError.value(
+        partition,
+        'partition',
+        'unknown partition; configured: ${_partitions.keys.join(", ")}',
+      );
+    }
+    final inBudget = _budgets.values.any((b) => b.partitions.contains(name));
+    if (config.lifecycle == null && !inBudget) {
+      throw StateError(
+        'partition "$name" has no lifecycle, so it is permanent and never '
+        'evicted; give it one (even with no cap) to be able to shrink it',
+      );
+    }
+    return _lifecycleRunner!.shrinkTo(name, maxBytes);
   }
 
   // ══════════════════════════════════════════════════════════════════════

@@ -103,6 +103,9 @@ enum EvictionReason {
 
   /// `Cellar.freeBytes` freed space on request.
   freeBytes,
+
+  /// `Cellar.shrinkTo` reduced the partition on request.
+  shrinkTo,
 }
 
 /// Decides whether an object may be evicted at all. Return false to keep it, for
